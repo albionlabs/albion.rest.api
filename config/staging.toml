@@ -1,23 +1,23 @@
-log_dir = "/mnt/data/albion-rest-api/logs"
-database_url = "sqlite:///mnt/data/albion-rest-api/albion.db"
+log_dir = "/mnt/data/albion-rest-api-staging/logs"
+database_url = "sqlite:///mnt/data/albion-rest-api-staging/albion.db"
 database_max_connections = 20
 usage_log_max_concurrency = 2
 response_cache_max_entries = 5000
 response_cache_ttl_seconds = 5
 registry_url = "https://raw.githubusercontent.com/albionlabs/albion.registry/770be78a07904958c41819ce64cd9bc03cb3647a/registry"
-private_registry_path = "/mnt/data/albion-rest-api/private-registry.data"
+private_registry_path = "/mnt/data/albion-rest-api-staging/private-registry.data"
 allow_registry_fallback = true
 rate_limit_global_rpm = 12000
 rate_limit_per_key_rpm = 1200
 docs_dir = "/var/lib/albion-docs"
-local_db_path = "/mnt/data/albion-rest-api/raindex.db"
+local_db_path = "/mnt/data/albion-rest-api-staging/raindex.db"
 sync_freshness_threshold_seconds = 300
 
 # Additional RPC endpoints injected ahead of the registry's own `rpcs:` list so
 # a single rate-limited public RPC can't freeze local-db sync. `${VAR}`
 # placeholders are resolved from the process environment (see
-# EnvironmentFile=/etc/albion/prod.env); any URL whose var is unset is dropped
-# at startup with a warning.
+# EnvironmentFile=/etc/albion/staging.env); any URL whose var is unset is
+# dropped at startup with a warning.
 [additional_rpcs]
 base = [
   "https://lb.drpc.org/ogrpc?network=base&dkey=${DRPC_API_KEY}",

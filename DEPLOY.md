@@ -6,6 +6,32 @@ Nix dev shell.
 
 ---
 
+## Albion environments
+
+| Environment | nixosConfiguration          | virtualHost                    | Data location                          |
+| ----------- | --------------------------- | ------------------------------ | -------------------------------------- |
+| **prod**    | `albion-rest-api-prod`      | `api.albionlabs.org`           | root filesystem, `/mnt/data/albion-rest-api` (no DO block volume) |
+| **staging** | `albion-rest-api-staging`   | `165-232-101-189.sslip.io`     | DO block volume `albion-rest-api-staging-data`, mounted at `/mnt/data` |
+
+Notes:
+
+- **Prod has no attached DigitalOcean block volume.** `dataVolumeName` is `null`
+  in `flake.nix`, and `os.nix` only declares the `/mnt/data` mount when
+  `dataVolumeName != null`. Prod data lives on the droplet root filesystem.
+- **The staging droplet (`165.232.101.189`) and its block volume
+  (`albion-rest-api-staging-data`) were provisioned manually with `doctl`**, not
+  through this repo's Terraform. Staging has no Terraform state entry, so staging
+  deploys resolve the host via the `DEPLOY_HOST` environment variable (the
+  `deploy.nix` preamble short-circuits Terraform IP resolution when
+  `DEPLOY_HOST` is set). Example:
+  `DEPLOY_HOST=165.232.101.189 nix run .#deployStagingAll`.
+- Secret RPC keys (`DRPC_API_KEY`, `ALCHEMY_API_KEY`, referenced by the
+  `[additional_rpcs]` config table via `${VAR}`) are supplied to the service via
+  `EnvironmentFile=/etc/albion/<name>.env` (e.g. `/etc/albion/prod.env`). The
+  leading `-` makes a missing file non-fatal on first boot.
+
+---
+
 ## Prerequisites
 
 ### 1. Nix with Flakes
