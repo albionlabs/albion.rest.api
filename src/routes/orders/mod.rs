@@ -5,9 +5,7 @@ mod get_by_tx;
 use crate::cache::RouteResponseCaches;
 use crate::error::ApiError;
 use crate::types::common::{Denomination, TokenRef};
-use crate::types::orders::{
-    OrderState, OrderSummary, OrderSummaryOrderType, OrdersListResponse, OrdersPagination,
-};
+use crate::types::orders::{OrderState, OrderSummary, OrdersListResponse, OrdersPagination};
 use crate::wrap_ratio::{
     persist_wrap_ratio_snapshots_best_effort, read_wrap_ratio_responses_for_addresses,
     wrap_ratio_values_from_responses, WrapRatioValue,
@@ -95,71 +93,6 @@ pub(crate) fn active_filter_for_state(state: Option<OrderState>) -> Option<bool>
         OrderState::Inactive => Some(false),
         OrderState::All => None,
     }
-}
-
-pub(crate) fn classify_order_type(order: &RaindexOrder) -> OrderSummaryOrderType {
-    let source = order.rainlang().or_else(|| order.dotrain_source());
-    let Some(source) = source else {
-        return OrderSummaryOrderType::Custom;
-    };
-
-    if source.contains("other-vwaio") {
-        return OrderSummaryOrderType::DynamicSpread;
-    }
-
-    let handle_io = handle_io_section(&source);
-    let has_dca_markers = handle_io.as_deref().is_some_and(|section| {
-        section.contains("min-amount:")
-            || section.contains("linear-growth")
-            || section.contains("amount-epochs")
-            || section.contains("halflife")
-    });
-    if has_dca_markers {
-        return OrderSummaryOrderType::Dca;
-    }
-
-    if handle_io.as_deref().is_some_and(is_empty_handle_io_section) {
-        return OrderSummaryOrderType::Limit;
-    }
-
-    OrderSummaryOrderType::Custom
-}
-
-fn handle_io_section(source: &str) -> Option<String> {
-    let mut section = Vec::new();
-    let mut in_handle_io = false;
-
-    for line in source.lines() {
-        let trimmed = line.trim();
-        let is_section_header =
-            trimmed.starts_with("/*") || trimmed.starts_with('#') || trimmed.starts_with("//");
-
-        if in_handle_io && is_section_header && !trimmed.contains("handle-io") {
-            break;
-        }
-
-        if in_handle_io {
-            section.push(line);
-            continue;
-        }
-
-        if trimmed.contains("handle-io") {
-            in_handle_io = true;
-            let after_marker = trimmed
-                .split_once("*/")
-                .map(|(_, after)| after.trim())
-                .filter(|after| !after.is_empty());
-            if let Some(after_marker) = after_marker {
-                section.push(after_marker);
-            }
-        }
-    }
-
-    in_handle_io.then(|| section.join("\n"))
-}
-
-fn is_empty_handle_io_section(section: &str) -> bool {
-    matches!(section.trim(), ":" | ":;")
 }
 
 fn group_orders_by_chain(orders: &[RaindexOrder]) -> GroupedOrders {
@@ -468,7 +401,7 @@ pub(crate) fn build_order_summary(
         removed_at: order
             .timestamp_removed()
             .and_then(|timestamp| timestamp.try_into().ok()),
-        order_type: classify_order_type(order),
+        order_type: crate::routes::order::determine_order_type(order),
         input_token: TokenRef {
             address: input_token_info.address(),
             symbol: input_token_info.symbol().unwrap_or_default(),
@@ -710,6 +643,7 @@ pub(crate) mod test_fixtures {
 mod tests {
     use super::*;
     use crate::routes::order::test_fixtures::{mock_failed_quote, mock_quote, order_json};
+    use crate::types::orders::OrderSummaryOrderType;
     use crate::wrap_ratio::WrapRatioValue;
     use alloy::primitives::address;
     use serde_json::json;
@@ -825,64 +759,18 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_order_type_no_source_is_custom() {
+    fn test_order_type_no_source_falls_back_to_strategy() {
+        // No rainlang and undecodable order_bytes ("0x01") → Strategy.
         let order = mock_order_with_source(None);
-        assert_eq!(classify_order_type(&order), OrderSummaryOrderType::Custom);
-    }
-
-    #[test]
-    fn test_classify_order_type_dynamic_spread() {
-        let order = mock_order_with_source(Some("using-words-from 0xabc\n_: other-vwaio();"));
         assert_eq!(
-            classify_order_type(&order),
-            OrderSummaryOrderType::DynamicSpread
+            crate::routes::order::determine_order_type(&order),
+            OrderSummaryOrderType::Strategy
         );
     }
 
     #[test]
-    fn test_classify_order_type_dca_from_handle_io_min_amount() {
-        let order = mock_order_with_source(Some(
-            r#"/* 0. calculate-io */
-_: 1;
-
-/* 1. handle-io */
-min-amount: 1;
-:;"#,
-        ));
-        assert_eq!(classify_order_type(&order), OrderSummaryOrderType::Dca);
-    }
-
-    #[test]
-    fn test_classify_order_type_dca_from_source_markers() {
-        for marker in ["linear-growth", "amount-epochs", "halflife"] {
-            let order = mock_order_with_source(Some(&format!(
-                r#"/* 0. calculate-io */
-_: 1;
-
-/* 1. handle-io */
-_: {marker}();
-:;"#
-            )));
-            assert_eq!(classify_order_type(&order), OrderSummaryOrderType::Dca);
-        }
-    }
-
-    #[test]
-    fn test_classify_order_type_ignores_dca_markers_outside_handle_io() {
-        let order = mock_order_with_source(Some(
-            r#"/* 0. calculate-io */
-// linear-growth appears in an unrelated comment.
-_: 1;
-
-/* 1. handle-io */
-:;"#,
-        ));
-
-        assert_eq!(classify_order_type(&order), OrderSummaryOrderType::Limit);
-    }
-
-    #[test]
-    fn test_classify_order_type_limit_from_simple_handle_io() {
+    fn test_order_type_limit_from_empty_handle_io() {
+        // An empty handle-io section (`:;` or `:`) marks a limit order.
         for handle_io in [":;", ":"] {
             let order = mock_order_with_source(Some(&format!(
                 r#"/* 0. calculate-io */
@@ -891,12 +779,15 @@ _: 1;
 /* 1. handle-io */
 {handle_io}"#
             )));
-            assert_eq!(classify_order_type(&order), OrderSummaryOrderType::Limit);
+            assert_eq!(
+                crate::routes::order::determine_order_type(&order),
+                OrderSummaryOrderType::Limit
+            );
         }
     }
 
     #[test]
-    fn test_classify_order_type_custom_fallback() {
+    fn test_order_type_strategy_from_nonempty_handle_io() {
         let order = mock_order_with_source(Some(
             r#"/* 0. calculate-io */
 _: 1;
@@ -904,7 +795,10 @@ _: 1;
 /* 1. handle-io */
 _: custom-handle-io();"#,
         ));
-        assert_eq!(classify_order_type(&order), OrderSummaryOrderType::Custom);
+        assert_eq!(
+            crate::routes::order::determine_order_type(&order),
+            OrderSummaryOrderType::Strategy
+        );
     }
 
     #[rocket::async_test]
@@ -962,7 +856,7 @@ _: custom-handle-io();"#,
         assert_eq!(summary.io_ratio, "-");
         assert_eq!(summary.max_output, None);
         assert_eq!(summary.output_vault_balance, "0");
-        assert_eq!(summary.order_type, OrderSummaryOrderType::Custom);
+        assert_eq!(summary.order_type, OrderSummaryOrderType::Strategy);
         assert_eq!(summary.order_bytes.as_ref(), &[1]);
     }
 

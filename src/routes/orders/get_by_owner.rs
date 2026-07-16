@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(result.orders[0].order_bytes.as_ref(), &[1]);
         assert!(result.orders[0].active);
         assert_eq!(result.orders[0].removed_at, None);
-        assert_eq!(result.orders[0].order_type, OrderSummaryOrderType::Custom);
+        assert_eq!(result.orders[0].order_type, OrderSummaryOrderType::Strategy);
         assert_eq!(result.orders[0].io_ratio, "1.5");
         assert_eq!(result.orders[0].max_output.as_deref(), Some("1"));
         assert_eq!(result.pagination.total_orders, 1);

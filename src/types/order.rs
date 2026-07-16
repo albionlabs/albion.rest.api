@@ -117,18 +117,22 @@ pub struct OrderDetailParams {
     pub denomination: Option<Denomination>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+/// Externally visible order taxonomy. The albion.dex client expects
+/// `z.enum(['limit', 'strategy'])`, so this is the only order-type surface the
+/// API serializes. `determine_order_type` (see `routes::order`) classifies an
+/// order into one of these two variants from its rainlang/bytecode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OrderType {
-    Dca,
-    Solver,
+    Limit,
+    Strategy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderDetailsInfo {
     #[serde(rename = "type")]
-    #[schema(example = "dca")]
+    #[schema(example = "strategy")]
     pub type_: OrderType,
     #[schema(example = "0.0005")]
     pub io_ratio: String,
@@ -208,11 +212,23 @@ mod tests {
     #[test]
     fn test_order_details_info_type_rename() {
         let info = OrderDetailsInfo {
-            type_: OrderType::Dca,
+            type_: OrderType::Strategy,
             io_ratio: "0.0005".into(),
         };
         let json = serde_json::to_string(&info).unwrap();
-        assert!(json.contains("\"type\":\"dca\""));
+        assert!(json.contains("\"type\":\"strategy\""));
         assert!(!json.contains("\"type_\""));
+    }
+
+    #[test]
+    fn test_order_type_serializes_limit_and_strategy() {
+        assert_eq!(
+            serde_json::to_string(&OrderType::Limit).unwrap(),
+            "\"limit\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OrderType::Strategy).unwrap(),
+            "\"strategy\""
+        );
     }
 }

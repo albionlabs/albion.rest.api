@@ -41,14 +41,10 @@ pub enum OrderState {
     All,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum OrderSummaryOrderType {
-    Limit,
-    Dca,
-    DynamicSpread,
-    Custom,
-}
+// Order summaries expose the same `limit` / `strategy` taxonomy as order
+// detail (see `crate::types::order::OrderType`). Re-exported here so callers of
+// this module keep a stable name.
+pub use crate::types::order::OrderType as OrderSummaryOrderType;
 
 #[derive(Debug, Clone, FromForm, Serialize, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
