@@ -17,6 +17,7 @@ pub(crate) struct TestClientBuilder {
     raindex_config: Option<crate::raindex::RaindexProvider>,
     private_registry_path: Option<std::path::PathBuf>,
     database_url: Option<String>,
+    sync_status_fetcher: Option<crate::sync_status::SyncStatusFetcher>,
 }
 
 impl TestClientBuilder {
@@ -27,16 +28,28 @@ impl TestClientBuilder {
             raindex_config: None,
             private_registry_path: None,
             database_url: None,
+            sync_status_fetcher: None,
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn rate_limiter(mut self, rate_limiter: crate::fairings::RateLimiter) -> Self {
         self.rate_limiter = rate_limiter;
         self
     }
 
+    #[allow(dead_code)]
     pub(crate) fn raindex_config(mut self, config: crate::raindex::RaindexProvider) -> Self {
         self.raindex_config = Some(config);
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn sync_status_fetcher(
+        mut self,
+        fetcher: crate::sync_status::SyncStatusFetcher,
+    ) -> Self {
+        self.sync_status_fetcher = Some(fetcher);
         self
     }
 
@@ -76,9 +89,13 @@ impl TestClientBuilder {
                         None => mock_raindex_registry_url().await,
                     },
                 };
-                crate::raindex::RaindexProvider::load(&registry_url, None)
-                    .await
-                    .expect("mock raindex config from registry url")
+                crate::raindex::RaindexProvider::load(
+                    &registry_url,
+                    None,
+                    std::collections::HashMap::new(),
+                )
+                .await
+                .expect("mock raindex config from registry url")
             }
         };
 
@@ -96,6 +113,7 @@ impl TestClientBuilder {
             app_state,
             docs_dir,
             2,
+            self.sync_status_fetcher,
         )
         .expect("valid rocket instance");
 
@@ -105,7 +123,7 @@ impl TestClientBuilder {
 
 pub(crate) async fn mock_raindex_config() -> crate::raindex::RaindexProvider {
     let registry_url = mock_raindex_registry_url().await;
-    crate::raindex::RaindexProvider::load(&registry_url, None)
+    crate::raindex::RaindexProvider::load(&registry_url, None, std::collections::HashMap::new())
         .await
         .expect("mock raindex config")
 }

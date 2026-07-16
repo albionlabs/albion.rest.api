@@ -1506,9 +1506,13 @@ using-tokens-from:
         );
         let registry_url =
             mock_raindex_registry_url_with_settings_and_tokens(&settings, &remote_tokens).await;
-        let config = crate::raindex::RaindexProvider::load(&registry_url, None)
-            .await
-            .expect("load raindex config");
+        let config = crate::raindex::RaindexProvider::load(
+            &registry_url,
+            None,
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("load raindex config");
         TestClientBuilder::new()
             .raindex_config(config)
             .build()
@@ -1585,9 +1589,13 @@ using-tokens-from:
         );
         let registry_url =
             mock_raindex_registry_url_with_settings_and_tokens(&settings, &remote_tokens).await;
-        let config = crate::raindex::RaindexProvider::load(&registry_url, None)
-            .await
-            .expect("load raindex config");
+        let config = crate::raindex::RaindexProvider::load(
+            &registry_url,
+            None,
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("load raindex config");
         TestClientBuilder::new()
             .raindex_config(config)
             .build()
@@ -1722,9 +1730,13 @@ using-tokens-from:
         );
         let registry_url =
             mock_raindex_registry_url_with_settings_and_tokens(&settings, &remote_tokens).await;
-        let config = crate::raindex::RaindexProvider::load(&registry_url, None)
-            .await
-            .expect("load raindex config");
+        let config = crate::raindex::RaindexProvider::load(
+            &registry_url,
+            None,
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("load raindex config");
         TestClientBuilder::new()
             .raindex_config(config)
             .build()
@@ -2143,9 +2155,13 @@ using-tokens-from:
         );
         let registry_url =
             mock_raindex_registry_url_with_settings_and_tokens(&settings, &remote_tokens).await;
-        let config = crate::raindex::RaindexProvider::load(&registry_url, None)
-            .await
-            .expect("load raindex config");
+        let config = crate::raindex::RaindexProvider::load(
+            &registry_url,
+            None,
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("load raindex config");
         TestClientBuilder::new()
             .raindex_config(config)
             .build()
@@ -2210,9 +2226,13 @@ using-tokens-from:
         .to_string();
         let registry_url =
             mock_raindex_registry_url_with_settings_and_tokens(&settings, &remote_tokens).await;
-        let config = crate::raindex::RaindexProvider::load(&registry_url, None)
-            .await
-            .expect("load raindex config");
+        let config = crate::raindex::RaindexProvider::load(
+            &registry_url,
+            None,
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("load raindex config");
         TestClientBuilder::new()
             .raindex_config(config)
             .build()
@@ -2238,6 +2258,51 @@ using-tokens-from:
         assert_eq!(
             first["address"],
             "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        );
+    }
+
+    #[rocket::async_test]
+    async fn test_get_tokens_does_not_leak_credentialed_rpc_urls() {
+        // Regression: with additional_rpcs injected (as prod does), the tokens
+        // response must NOT expose credentialed RPC URLs. The dRPC dkey and
+        // Alchemy v2 key are secrets; the network.rpcs list is sanitized out of
+        // TokenResponse. Guards against the leak observed on the old API.
+        let registry_url = crate::test_helpers::mock_raindex_registry_url().await;
+        let mut additional_rpcs = std::collections::HashMap::new();
+        additional_rpcs.insert(
+            "base".to_string(),
+            vec![
+                "https://lb.drpc.org/ogrpc?network=base&dkey=SECRET_DRPC_KEY".to_string(),
+                "https://base-mainnet.g.alchemy.com/v2/SECRET_ALCHEMY_KEY".to_string(),
+            ],
+        );
+        let config = crate::raindex::RaindexProvider::load(&registry_url, None, additional_rpcs)
+            .await
+            .expect("load raindex config with additional_rpcs");
+        let client = TestClientBuilder::new()
+            .raindex_config(config)
+            .build()
+            .await;
+        let (key_id, secret) = seed_api_key(&client).await;
+        let header = basic_auth_header(&key_id, &secret);
+        let response = client
+            .get("/v1/tokens")
+            .header(Header::new("Authorization", header))
+            .dispatch()
+            .await;
+        assert_eq!(response.status(), Status::Ok);
+        let raw_body = response.into_string().await.expect("tokens body");
+        assert!(
+            !raw_body.contains("dkey="),
+            "tokens response leaked a dRPC dkey: {raw_body}"
+        );
+        assert!(
+            !raw_body.contains("alchemy.com/v2/"),
+            "tokens response leaked an Alchemy v2 key: {raw_body}"
+        );
+        assert!(
+            !raw_body.contains("SECRET_DRPC_KEY") && !raw_body.contains("SECRET_ALCHEMY_KEY"),
+            "tokens response leaked an injected RPC credential: {raw_body}"
         );
     }
 
@@ -2278,9 +2343,13 @@ tokens:
 "#;
         let registry_url =
             crate::test_helpers::mock_raindex_registry_url_with_settings(settings).await;
-        let config = crate::raindex::RaindexProvider::load(&registry_url, None)
-            .await
-            .expect("load raindex config");
+        let config = crate::raindex::RaindexProvider::load(
+            &registry_url,
+            None,
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("load raindex config");
         let client = TestClientBuilder::new()
             .raindex_config(config)
             .build()
@@ -2333,9 +2402,13 @@ tokens:
         );
         let registry_url =
             crate::test_helpers::mock_raindex_registry_url_with_settings(&settings).await;
-        let config = crate::raindex::RaindexProvider::load(&registry_url, None)
-            .await
-            .expect("load raindex config");
+        let config = crate::raindex::RaindexProvider::load(
+            &registry_url,
+            None,
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("load raindex config");
         let client = TestClientBuilder::new()
             .raindex_config(config)
             .build()
@@ -2410,9 +2483,13 @@ using-tokens-from:
 }"#;
         let registry_url =
             mock_raindex_registry_url_with_settings_and_tokens(settings, remote_tokens).await;
-        let config = crate::raindex::RaindexProvider::load(&registry_url, None)
-            .await
-            .expect("load raindex config");
+        let config = crate::raindex::RaindexProvider::load(
+            &registry_url,
+            None,
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("load raindex config");
         let client = TestClientBuilder::new()
             .raindex_config(config)
             .build()

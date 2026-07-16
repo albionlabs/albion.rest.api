@@ -54,38 +54,42 @@ pub async fn put_registry(
         validate_request(&req)?;
         let payload_sha256 = artifact_sha256(&req.registry_artifact);
 
-        let db_path = {
+        let (db_path, additional_rpcs) = {
             let guard = shared_raindex.read().await;
-            guard.db_path()
+            (guard.db_path(), guard.additional_rpcs())
         };
 
-        let new_provider = match RaindexProvider::load(&req.registry_artifact, db_path).await {
-            Ok(provider) => provider,
-            Err(e) => {
-                let validation_error = e.safe_summary();
-                tracing::warn!(
-                    source_commit = %req.source_commit,
-                    payload_sha256 = %payload_sha256,
-                    admin_key_id = %admin.0.key_id,
-                    validation_error = %validation_error,
-                    "failed to validate registry artifact"
-                );
+        // Apply the same additional_rpcs injection to admin-uploaded private
+        // registry artifacts so a rate-limited public RPC can't freeze sync
+        // regardless of registry source.
+        let new_provider =
+            match RaindexProvider::load(&req.registry_artifact, db_path, additional_rpcs).await {
+                Ok(provider) => provider,
+                Err(e) => {
+                    let validation_error = e.safe_summary();
+                    tracing::warn!(
+                        source_commit = %req.source_commit,
+                        payload_sha256 = %payload_sha256,
+                        admin_key_id = %admin.0.key_id,
+                        validation_error = %validation_error,
+                        "failed to validate registry artifact"
+                    );
 
-                insert_history(
-                    pool,
-                    &req,
-                    &payload_sha256,
-                    &admin,
-                    registry_history::VALIDATION_STATUS_FAILED,
-                    Some(validation_error),
-                )
-                .await?;
+                    insert_history(
+                        pool,
+                        &req,
+                        &payload_sha256,
+                        &admin,
+                        registry_history::VALIDATION_STATUS_FAILED,
+                        Some(validation_error),
+                    )
+                    .await?;
 
-                return Err(ApiError::BadRequest(
-                    "failed to validate registry artifact".into(),
-                ));
-            }
-        };
+                    return Err(ApiError::BadRequest(
+                        "failed to validate registry artifact".into(),
+                    ));
+                }
+            };
 
         let artifact_store = &app_state.registry_artifact_store;
         let _update_guard = artifact_store.lock_update().await;

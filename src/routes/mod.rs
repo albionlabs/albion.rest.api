@@ -4,6 +4,7 @@ pub mod order;
 pub mod orders;
 pub mod registry;
 pub mod swap;
+pub mod sync_status;
 pub mod tokens;
 pub mod trades;
 pub mod vaults;

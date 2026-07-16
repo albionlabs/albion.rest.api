@@ -8,6 +8,7 @@ mod catchers;
 mod cli;
 mod config;
 mod db;
+mod db_integrity;
 mod denomination;
 mod erc4626;
 mod error;
@@ -15,6 +16,7 @@ mod fairings;
 mod raindex;
 mod registry_artifact;
 mod routes;
+mod sync_status;
 mod telemetry;
 mod types;
 mod wrap_ratio;
@@ -80,6 +82,7 @@ enum StartupRegistryError {
     paths(
         routes::health::get_health,
         routes::health::get_health_detailed,
+        routes::sync_status::get_sync_status,
         routes::tokens::get_tokens,
         routes::tokens::get_wrap_ratios,
         routes::tokens::get_wrap_ratio_by_address,
@@ -122,9 +125,9 @@ enum StartupRegistryError {
         (name = "Registry", description = "Registry information endpoints"),
     ),
     info(
-        title = "st0x REST API",
+        title = "Albion REST API",
         version = "0.1.0",
-        description = "REST API for st0x orderbook operations",
+        description = "REST API for Albion orderbook operations",
     )
 )]
 struct ApiDoc;
@@ -161,6 +164,7 @@ pub(crate) fn rocket(
     app_state: app_state::ApplicationState,
     docs_dir: String,
     usage_log_max_concurrency: usize,
+    sync_status_fetcher: Option<sync_status::SyncStatusFetcher>,
 ) -> Result<rocket::Rocket<rocket::Build>, StartupError> {
     let cors = configure_cors()?;
 
@@ -173,7 +177,9 @@ pub(crate) fn rocket(
         .manage(rate_limiter)
         .manage(raindex_config)
         .manage(app_state)
+        .manage(sync_status_fetcher)
         .mount("/", routes::health::routes())
+        .mount("/", routes::sync_status::routes())
         .mount("/v1/tokens", routes::tokens::routes())
         .mount("/v1/swap", routes::swap::routes())
         .mount("/v2/swap", routes::swap::routes_v2())
@@ -198,13 +204,14 @@ pub(crate) fn rocket(
 async fn load_configured_raindex(
     cfg: &config::Config,
     local_db_path: PathBuf,
+    additional_rpcs: std::collections::HashMap<String, Vec<String>>,
 ) -> Result<raindex::RaindexProvider, StartupRegistryError> {
     if cfg.registry_url.is_empty() {
         return Err(StartupRegistryError::MissingConfiguredRegistry);
     }
 
     tracing::info!("loading raindex registry from config");
-    raindex::RaindexProvider::load(&cfg.registry_url, Some(local_db_path))
+    raindex::RaindexProvider::load(&cfg.registry_url, Some(local_db_path), additional_rpcs)
         .await
         .map_err(StartupRegistryError::ConfiguredRegistryLoad)
 }
@@ -214,6 +221,7 @@ async fn load_startup_raindex(
     pool: &db::DbPool,
     registry_artifact_store: &registry_artifact::RegistryArtifactStore,
     local_db_path: PathBuf,
+    additional_rpcs: std::collections::HashMap<String, Vec<String>>,
 ) -> Result<raindex::RaindexProvider, StartupRegistryError> {
     let private_registry_artifact = registry_artifact_store
         .load()
@@ -278,8 +286,12 @@ async fn load_startup_raindex(
             path = %registry_artifact_store.path().display(),
             "loading private registry artifact from file"
         );
-        match raindex::RaindexProvider::load(&private_registry_source, Some(local_db_path.clone()))
-            .await
+        match raindex::RaindexProvider::load(
+            &private_registry_source,
+            Some(local_db_path.clone()),
+            additional_rpcs.clone(),
+        )
+        .await
         {
             Ok(provider) => {
                 tracing::info!("loaded private raindex registry");
@@ -296,7 +308,7 @@ async fn load_startup_raindex(
         }
     }
 
-    load_configured_raindex(cfg, local_db_path).await
+    load_configured_raindex(cfg, local_db_path, additional_rpcs).await
 }
 
 #[rocket::main]
@@ -372,20 +384,73 @@ async fn main() {
                 }
             }
 
-            let raindex_config =
-                match load_startup_raindex(&cfg, &pool, &registry_artifact_store, local_db_path)
-                    .await
-                {
-                    Ok(config) => {
-                        tracing::info!("raindex registry loaded");
-                        config
+            // Resolve ${VAR} placeholders in additional_rpcs against the
+            // environment once, then inject them into every registry load path
+            // so a rate-limited public RPC can never freeze local-db sync.
+            let additional_rpcs = config::resolve_rpc_overrides(&cfg.additional_rpcs);
+            for (network, urls) in &additional_rpcs {
+                tracing::info!(network = %network, count = urls.len(), "resolved additional RPCs");
+            }
+
+            // Guard against the upstream bootstrap-db rollback failure mode:
+            // clear orphan rows when target_watermarks is empty but data tables
+            // hold rows. Non-fatal — a failed check must not block startup.
+            match db_integrity::clear_orphan_rows_if_needed(&local_db_path) {
+                Ok(true) => tracing::warn!(
+                    db_path = %local_db_path.display(),
+                    "db_integrity: cleared orphan rows on startup"
+                ),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    db_path = %local_db_path.display(),
+                    "db_integrity: check failed; proceeding with raindex client init"
+                ),
+            }
+
+            let raindex_config = match load_startup_raindex(
+                &cfg,
+                &pool,
+                &registry_artifact_store,
+                local_db_path.clone(),
+                additional_rpcs,
+            )
+            .await
+            {
+                Ok(config) => {
+                    tracing::info!("raindex registry loaded");
+                    config
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to load raindex registry");
+                    drop(log_guard);
+                    std::process::exit(1);
+                }
+            };
+
+            // Build the /sync/status fetcher from the same local DB the
+            // scheduler writes to. Only available when the provider actually
+            // has a local DB configured; otherwise the handler returns 503.
+            let sync_status_fetcher = match raindex_config.db_path() {
+                Some(db_path) => {
+                    match sync_status::SyncStatusFetcher::new(
+                        &db_path,
+                        cfg.sync_freshness_threshold_seconds,
+                    ) {
+                        Ok(fetcher) => Some(fetcher),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to build sync status fetcher; /sync/status will report unavailable");
+                            None
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to load raindex registry");
-                        drop(log_guard);
-                        std::process::exit(1);
-                    }
-                };
+                }
+                None => {
+                    tracing::warn!(
+                        "no local db path configured; /sync/status will report unavailable"
+                    );
+                    None
+                }
+            };
 
             let shared_raindex = tokio::sync::RwLock::new(raindex_config);
             let rate_limiter =
@@ -408,6 +473,7 @@ async fn main() {
                 app_state,
                 cfg.docs_dir,
                 cfg.usage_log_max_concurrency,
+                sync_status_fetcher,
             ) {
                 Ok(r) => r,
                 Err(e) => {
@@ -524,6 +590,8 @@ mod tests {
             rate_limit_per_key_rpm: 60,
             docs_dir: "./docs/book".to_string(),
             local_db_path: local_db_path.to_string_lossy().into_owned(),
+            sync_freshness_threshold_seconds: 300,
+            additional_rpcs: std::collections::HashMap::new(),
         }
     }
 
@@ -568,7 +636,14 @@ mod tests {
             .expect("persist invalid artifact");
         insert_successful_registry_history(&pool, invalid_artifact).await;
 
-        let provider = super::load_startup_raindex(&cfg, &pool, &store, local_db_path).await;
+        let provider = super::load_startup_raindex(
+            &cfg,
+            &pool,
+            &store,
+            local_db_path,
+            std::collections::HashMap::new(),
+        )
+        .await;
 
         assert!(provider.is_ok());
     }
@@ -597,9 +672,15 @@ mod tests {
             .expect("persist invalid artifact");
         insert_successful_registry_history(&pool, invalid_artifact).await;
 
-        let err = super::load_startup_raindex(&cfg, &pool, &store, local_db_path)
-            .await
-            .expect_err("private registry load should fail");
+        let err = super::load_startup_raindex(
+            &cfg,
+            &pool,
+            &store,
+            local_db_path,
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect_err("private registry load should fail");
 
         assert!(matches!(
             err,
