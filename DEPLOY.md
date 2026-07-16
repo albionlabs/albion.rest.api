@@ -1,30 +1,30 @@
 # Digital Ocean Deployment Guide
 
-This project deploys a NixOS droplet on DigitalOcean via Terraform, then installs
-the service using `nixos-anywhere` and `deploy-rs`. All tooling runs inside the
-Nix dev shell.
+This project deploys a NixOS droplet on DigitalOcean via Terraform, then
+installs the service using `nixos-anywhere` and `deploy-rs`. All tooling runs
+inside the Nix dev shell.
 
 ---
 
 ## Albion environments
 
-| Environment | nixosConfiguration          | virtualHost                    | Data location                          |
-| ----------- | --------------------------- | ------------------------------ | -------------------------------------- |
-| **prod**    | `albion-rest-api-prod`      | `api.albionlabs.org`           | root filesystem, `/mnt/data/albion-rest-api` (no DO block volume) |
-| **staging** | `albion-rest-api-staging`   | `165-232-101-189.sslip.io`     | DO block volume `albion-rest-api-staging-data`, mounted at `/mnt/data` |
+| Environment | nixosConfiguration        | virtualHost               | Data location                                                          |
+| ----------- | ------------------------- | ------------------------- | ---------------------------------------------------------------------- |
+| **prod**    | `albion-rest-api-prod`    | `api.albionlabs.org`      | root filesystem, `/mnt/data/albion-rest-api` (no DO block volume)      |
+| **staging** | `albion-rest-api-staging` | `138-68-167-234.sslip.io` | DO block volume `albion-rest-api-staging-data`, mounted at `/mnt/data` |
 
 Notes:
 
 - **Prod has no attached DigitalOcean block volume.** `dataVolumeName` is `null`
   in `flake.nix`, and `os.nix` only declares the `/mnt/data` mount when
   `dataVolumeName != null`. Prod data lives on the droplet root filesystem.
-- **The staging droplet (`165.232.101.189`) and its block volume
+- **The staging droplet (`138.68.167.234`) and its block volume
   (`albion-rest-api-staging-data`) were provisioned manually with `doctl`**, not
-  through this repo's Terraform. Staging has no Terraform state entry, so staging
-  deploys resolve the host via the `DEPLOY_HOST` environment variable (the
-  `deploy.nix` preamble short-circuits Terraform IP resolution when
+  through this repo's Terraform. Staging has no Terraform state entry, so
+  staging deploys resolve the host via the `DEPLOY_HOST` environment variable
+  (the `deploy.nix` preamble short-circuits Terraform IP resolution when
   `DEPLOY_HOST` is set). Example:
-  `DEPLOY_HOST=165.232.101.189 nix run .#deployStagingAll`.
+  `DEPLOY_HOST=138.68.167.234 nix run .#deployStagingAll`.
 - Secret RPC keys (`DRPC_API_KEY`, `ALCHEMY_API_KEY`, referenced by the
   `[additional_rpcs]` config table via `${VAR}`) are supplied to the service via
   `EnvironmentFile=/etc/albion/<name>.env` (e.g. `/etc/albion/prod.env`). The
@@ -35,7 +35,9 @@ Notes:
 ## Prerequisites
 
 ### 1. Nix with Flakes
+
 Install Nix and enable flakes:
+
 ```bash
 # Install Nix (if not already installed)
 sh <(curl -L https://nixos.org/nix/install) --daemon
@@ -45,18 +47,26 @@ echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
 ```
 
 ### 2. SSH key pair
+
 The deployment uses an ed25519 key. Generate one if needed:
+
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
 ```
 
 ### 3. DigitalOcean account setup
-- Create a **Personal Access Token** (read+write) at: DigitalOcean → API → Tokens
-- Upload your SSH public key to DigitalOcean under: Settings → Security → SSH Keys
-  - Note the **name** you give it — you'll need it below (default expected: `st0x-op`)
+
+- Create a **Personal Access Token** (read+write) at: DigitalOcean → API →
+  Tokens
+- Upload your SSH public key to DigitalOcean under: Settings → Security → SSH
+  Keys
+  - Note the **name** you give it — you'll need it below (default expected:
+    `st0x-op`)
 
 ### 4. Enter the Nix dev shell
+
 All commands below must be run inside this shell:
+
 ```bash
 nix develop
 ```
@@ -65,7 +75,8 @@ nix develop
 
 ## Step 1 — Add your SSH key to `keys.nix`
 
-Open `keys.nix` and add your SSH public key to the `keys` map and the relevant roles:
+Open `keys.nix` and add your SSH public key to the `keys` map and the relevant
+roles:
 
 ```nix
 rec {
@@ -81,25 +92,29 @@ rec {
 }
 ```
 
-This controls who can decrypt secrets (`infra` role) and SSH into the server (`ssh` role).
+This controls who can decrypt secrets (`infra` role) and SSH into the server
+(`ssh` role).
 
 ---
 
 ## Step 2 — Configure Terraform variables
 
-The Terraform variables are stored encrypted. Use the helper to create/edit them:
+The Terraform variables are stored encrypted. Use the helper to create/edit
+them:
+
 ```bash
 nix develop -c tf-edit-vars
 ```
 
-This opens your `$EDITOR` (defaults to `vi`) with the decrypted vars file.
-Fill in the required value:
+This opens your `$EDITOR` (defaults to `vi`) with the decrypted vars file. Fill
+in the required value:
 
 ```hcl
 do_token = "your-digitalocean-api-token"
 ```
 
 Optional overrides (defaults shown):
+
 ```hcl
 ssh_key_name   = "st0x-op"   # Name of your SSH key in DigitalOcean
 region         = "nyc3"       # DigitalOcean region slug
@@ -107,8 +122,8 @@ droplet_size   = "s-2vcpu-4gb"
 volume_size_gb = 5
 ```
 
-Save and exit — the file is automatically re-encrypted with `rage` using the keys
-in `keys.nix`. **Never commit the plaintext `infra/terraform.tfvars`.**
+Save and exit — the file is automatically re-encrypted with `rage` using the
+keys in `keys.nix`. **Never commit the plaintext `infra/terraform.tfvars`.**
 
 ---
 
@@ -126,6 +141,7 @@ nix develop -c tf-apply
 ```
 
 This provisions:
+
 - Ubuntu 24.04 droplet (`st0x-rest-api-nixos`) in the chosen region
 - 5 GB block storage volume (`st0x-rest-api-data`) mounted at `/mnt/data`
 - A reserved IP attached to the droplet
@@ -137,20 +153,24 @@ The Terraform state is encrypted with `rage` and committed as
 
 ## Step 4 — Bootstrap NixOS onto the droplet
 
-The droplet boots Ubuntu. This step installs NixOS over it using `nixos-anywhere`:
+The droplet boots Ubuntu. This step installs NixOS over it using
+`nixos-anywhere`:
 
 ```bash
 nix develop -c bootstrap-nixos
 ```
 
 This command will:
+
 1. Resolve the droplet IP from the Terraform state
-2. Run `nixos-anywhere` to partition the disk (via `disko.nix`) and install NixOS
+2. Run `nixos-anywhere` to partition the disk (via `disko.nix`) and install
+   NixOS
 3. Wait for the host to reboot
 4. Read the new SSH host key from the server
 5. **Automatically update `keys.nix`** with the real host key
 
 After this step, commit the updated `keys.nix`:
+
 ```bash
 git add keys.nix
 git commit -m "chore: update host SSH key after bootstrap"
@@ -160,14 +180,15 @@ git commit -m "chore: update host SSH key after bootstrap"
 
 ## Step 5 — Re-encrypt secrets with the host key
 
-Now that the host key is in `keys.nix`, re-encrypt all secrets so the server
-can decrypt them at runtime:
+Now that the host key is in `keys.nix`, re-encrypt all secrets so the server can
+decrypt them at runtime:
 
 ```bash
 nix develop -c tf-rekey
 ```
 
 Commit the re-encrypted secret files:
+
 ```bash
 git add infra/terraform.tfvars.age infra/terraform.tfstate.age
 git commit -m "chore: rekey secrets with new host key"
@@ -184,6 +205,7 @@ nix develop -c deploy-all
 ```
 
 Or deploy them separately:
+
 ```bash
 # Deploy only the OS/system configuration
 nix develop -c deploy-nixos
@@ -193,6 +215,7 @@ nix develop -c deploy-service rest-api
 ```
 
 The deploy-rs workflow:
+
 - Builds the Nix derivation locally (or cross-builds for non-Linux hosts)
 - Copies the closure to the remote via SSH
 - Activates the system profile / restarts the service
@@ -201,21 +224,24 @@ The deploy-rs workflow:
 
 ## Step 7 — DNS and TLS
 
-1. Point your domain (`api.st0x.io` or your fork's domain) to the **reserved IP**
-   output by Terraform:
+1. Point your domain (`api.st0x.io` or your fork's domain) to the **reserved
+   IP** output by Terraform:
    ```bash
    nix develop -c resolve-ip   # prints the reserved IP
    ```
-2. Nginx is pre-configured to terminate TLS via Let's Encrypt (ACME).
-   TLS certificates are issued automatically on first HTTP request to port 80.
+2. Nginx is pre-configured to terminate TLS via Let's Encrypt (ACME). TLS
+   certificates are issued automatically on first HTTP request to port 80.
 
 Check the domain in `os.nix`:
+
 ```nix
 virtualHosts."api.st0x.io" = { ... };
 ```
+
 Update it to your domain before deploying if this is a fork.
 
 Also update the ACME contact email:
+
 ```nix
 security.acme.defaults.email = "ops@your-domain.io";
 ```
@@ -225,6 +251,7 @@ security.acme.defaults.email = "ops@your-domain.io";
 ## Step 8 — Create an API key
 
 SSH into the server and create the first API key:
+
 ```bash
 nix develop -c remote   # opens an SSH session as root
 
@@ -234,7 +261,9 @@ nix develop -c remote   # opens an SSH session as root
   --name "admin"
 ```
 
-Or more practically, check the systemd service for the exact binary path and config:
+Or more practically, check the systemd service for the exact binary path and
+config:
+
 ```bash
 systemctl cat rest-api
 ```
@@ -244,6 +273,7 @@ systemctl cat rest-api
 ## Post-deployment — Ongoing operations
 
 ### Redeploy after code changes
+
 ```bash
 nix develop -c deploy-service rest-api
 ```
@@ -344,16 +374,19 @@ Required repository secrets:
   the preview host.
 
 ### SSH into the server
+
 ```bash
 nix develop -c remote
 ```
 
 ### SSH into preview
+
 ```bash
 nix develop -c remote-preview
 ```
 
 ### View service logs
+
 ```bash
 nix develop -c remote
 # on server:
@@ -363,6 +396,7 @@ ls /mnt/data/st0x-rest-api/logs/
 ```
 
 ### Check service status
+
 ```bash
 nix develop -c remote
 # on server:
@@ -370,6 +404,7 @@ systemctl status rest-api
 ```
 
 ### Tear down infrastructure
+
 ```bash
 nix develop -c tf-destroy
 ```
@@ -398,6 +433,7 @@ Server (NixOS on DigitalOcean)
 
 Set `RUST_LOG` to control log verbosity. The deployed systemd service sets this
 in `os.nix`:
+
 ```
 RUST_LOG=st0x_rest_api=info,raindex_common=info,raindex_quote=info,rocket=warn,warn
 ```
