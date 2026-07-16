@@ -42,6 +42,10 @@ let
 
     COMMIT_SHA = builtins.getEnv "COMMIT_SHA";
 
+    # reqwest (rustls-native-certs) panics constructing a client when the
+    # sandbox has no CA bundle — tests build clients even for local mocks.
+    SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+
     # Stage a WRITABLE copy of the zip: build.rs fs::copy preserves the source
     # mode, and cargo runs the build script more than once per build — a 0444
     # store path would make the second copy fail with PermissionDenied.
