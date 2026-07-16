@@ -43,7 +43,7 @@
             disko.nixosModules.disko
             ragenix.nixosModules.default
             ./os.nix
-          ];
+          ] ++ (albionEnv.extraModules or [ ]);
         };
     in
     {
@@ -66,6 +66,35 @@
         configFile = ./config/staging.toml;
         dataDir = "/mnt/data/albion-rest-api-staging";
         dataVolumeName = "albion-rest-api-staging-data";
+        extraModules = [
+          (
+            { lib, ... }:
+            {
+              # cloud-init network configuration proved unreliable on this
+              # new-generation DO droplet (host booted with no networking) —
+              # pin the static addresses DO assigns instead.
+              services.cloud-init.network.enable = lib.mkForce false;
+              networking = {
+                interfaces.eth0.ipv4.addresses = [
+                  {
+                    address = "138.68.167.234";
+                    prefixLength = 20;
+                  }
+                ];
+                defaultGateway = "138.68.160.1";
+                nameservers = [
+                  "1.1.1.1"
+                  "8.8.8.8"
+                ];
+              };
+              # Never block boot waiting on the data volume.
+              fileSystems."/mnt/data".options = [
+                "nofail"
+                "x-systemd.device-timeout=10s"
+              ];
+            }
+          )
+        ];
       };
 
       nixosConfigurations.albion-rest-api = self.nixosConfigurations.albion-rest-api-prod;
