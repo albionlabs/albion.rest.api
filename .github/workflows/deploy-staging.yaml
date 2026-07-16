@@ -86,7 +86,7 @@ jobs:
             echo "Unable to derive preview bootstrap public key from SSH_KEY" >&2
             exit 1
           fi
-          nix run .#tfPreviewProvision
+          nix run .#tfStagingProvision
       - name: Commit encrypted Terraform state
         if: (inputs.deploy_scope || 'service') == 'all'
         run: |
@@ -99,7 +99,7 @@ jobs:
           fi
       - name: Resolve preview host IP
         run: |
-          host_ip=$(nix run .#resolvePreviewIp)
+          host_ip=$(nix run .#resolveStagingIp)
           if [[ ! "$host_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
             echo "Invalid preview host IP resolved: $host_ip" >&2
             exit 1
@@ -108,7 +108,7 @@ jobs:
           echo "HOST_IP=$host_ip" >> "$GITHUB_ENV"
       - name: Bootstrap preview host
         if: (inputs.deploy_scope || 'service') == 'all'
-        run: DEPLOY_ENV=preview nix run .#bootstrap
+        run: DEPLOY_ENV=staging nix run .#bootstrap
       - name: Trust preview host key
         env:
           PREVIEW_SSH_HOST_KEY: ${{ secrets.PREVIEW_SSH_HOST_KEY }}
@@ -125,12 +125,12 @@ jobs:
       - name: Deploy preview service
         if: (inputs.deploy_scope || 'service') == 'service'
         timeout-minutes: 60
-        run: nix run .#deployPreviewService -- rest-api
+        run: nix run .#deployStagingService -- rest-api
       - name: Deploy preview system
         if: (inputs.deploy_scope || 'service') == 'system'
         timeout-minutes: 60
-        run: nix run .#deployPreviewNixos
+        run: nix run .#deployStagingNixos
       - name: Deploy preview system and service
         if: (inputs.deploy_scope || 'service') == 'all'
         timeout-minutes: 60
-        run: nix run .#deployPreviewAll
+        run: nix run .#deployStagingAll

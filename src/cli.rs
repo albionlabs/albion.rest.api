@@ -6,8 +6,8 @@ use rand::RngCore;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "st0x_rest_api")]
-#[command(about = "st0x REST API server and key management")]
+#[command(name = "albion_rest_api")]
+#[command(about = "Albion REST API server and key management")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -49,13 +49,13 @@ pub enum KeysCommand {
 }
 
 pub fn print_usage() {
-    println!("Usage: st0x_rest_api <command>");
+    println!("Usage: albion_rest_api <command>");
     println!();
     println!("Commands:");
     println!("  serve    Start the API server");
     println!("  keys     Manage API keys");
     println!();
-    println!("Run 'st0x_rest_api <command> --help' for more information on a command.");
+    println!("Run 'albion_rest_api <command> --help' for more information on a command.");
 }
 
 pub async fn handle_keys_command(

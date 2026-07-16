@@ -1,5 +1,5 @@
 {
-  description = "st0x REST API";
+  description = "Albion REST API";
 
   inputs = {
     rainix.url = "github:rainlanguage/rainix";
@@ -19,37 +19,42 @@
   outputs = { self, flake-utils, rainix, ragenix, deploy-rs, disko
     , nixos-anywhere, crane, ... }:
     let
-      mkNixosConfiguration = st0xEnv:
+      mkNixosConfiguration = albionEnv:
         rainix.inputs.nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
 
           specialArgs = {
-            inherit st0xEnv;
-            docsRoot = self.packages.x86_64-linux.st0x-docs;
+            inherit albionEnv;
+            docsRoot = self.packages.x86_64-linux.albion-docs;
           };
 
           modules =
             [ disko.nixosModules.disko ragenix.nixosModules.default ./os.nix ];
         };
     in {
-      nixosConfigurations.st0x-rest-api-prod = mkNixosConfiguration {
+      # Albion prod runs on the DigitalOcean droplet root filesystem — there is
+      # no attached DO block volume, so dataVolumeName is null and os.nix skips
+      # the /mnt/data mount (data lives on the root fs under dataDir).
+      nixosConfigurations.albion-rest-api-prod = mkNixosConfiguration {
         name = "prod";
-        virtualHost = "api.st0x.io";
+        virtualHost = "api.albionlabs.org";
         configFile = ./config/prod.toml;
-        dataDir = "/mnt/data/st0x-rest-api";
-        dataVolumeName = "st0x-rest-api-data";
+        dataDir = "/mnt/data/albion-rest-api";
+        dataVolumeName = null;
       };
 
-      nixosConfigurations.st0x-rest-api-preview = mkNixosConfiguration {
-        name = "preview";
-        virtualHost = "api.staging.st0x.io";
-        configFile = ./config/preview.toml;
-        dataDir = "/mnt/data/st0x-rest-api-preview";
-        dataVolumeName = "st0x-rest-api-preview-data";
+      # Staging droplet (165.232.101.189) was provisioned manually with doctl,
+      # including the attached DO block volume "albion-rest-api-staging-data".
+      nixosConfigurations.albion-rest-api-staging = mkNixosConfiguration {
+        name = "staging";
+        virtualHost = "165-232-101-189.sslip.io";
+        configFile = ./config/staging.toml;
+        dataDir = "/mnt/data/albion-rest-api-staging";
+        dataVolumeName = "albion-rest-api-staging-data";
       };
 
-      nixosConfigurations.st0x-rest-api =
-        self.nixosConfigurations.st0x-rest-api-prod;
+      nixosConfigurations.albion-rest-api =
+        self.nixosConfigurations.albion-rest-api-prod;
 
       deploy = (import ./deploy.nix { inherit deploy-rs self; }).config;
 
@@ -75,12 +80,12 @@
               localSystem = system;
             };
 
-          st0xRust = pkgs.callPackage ./rust.nix {
+          albionRust = pkgs.callPackage ./rust.nix {
             inherit craneLib;
             inherit (pkgs) sqlx-cli;
           };
-          st0x-docs = pkgs.stdenv.mkDerivation {
-            pname = "st0x-docs";
+          albion-docs = pkgs.stdenv.mkDerivation {
+            pname = "albion-docs";
             version = "0.1.0";
             src = ./docs;
             nativeBuildInputs = [ pkgs.mdbook ];
@@ -89,7 +94,7 @@
           };
 
         in rainixPkgs // deployPkgs // {
-          inherit st0x-docs;
+          inherit albion-docs;
           rs-test = rainix.mkTask.${system} {
             name = "rs-test";
             body = ''
@@ -100,8 +105,8 @@
           inherit (infraPkgs)
             tfInit tfPlan tfApply tfImport tfDestroy tfEditVars;
 
-          st0x-rest-api = st0xRust.package;
-          st0x-clippy = st0xRust.clippy;
+          albion-rest-api = albionRust.package;
+          albion-clippy = albionRust.clippy;
 
           prepSolArtifacts = rainix.mkTask.${system} {
             name = "prep-sol-artifacts";
@@ -121,10 +126,10 @@
               ${infraPkgs.resolveIp}
               deploy_env="''${DEPLOY_ENV:-prod}"
               case "$deploy_env" in
-                prod) nixos_config="st0x-rest-api-prod" ;;
-                preview) nixos_config="st0x-rest-api-preview" ;;
+                prod) nixos_config="albion-rest-api-prod" ;;
+                staging) nixos_config="albion-rest-api-staging" ;;
                 *)
-                  echo "unsupported DEPLOY_ENV '$deploy_env' (expected prod or preview)" >&2
+                  echo "unsupported DEPLOY_ENV '$deploy_env' (expected prod or staging)" >&2
                   exit 1
                   ;;
               esac
@@ -165,10 +170,10 @@
 
                 echo "Updated host key in keys.nix"
               else
-                echo "Preview SSH host key:"
+                echo "Staging SSH host key:"
                 echo "$new_key"
                 echo
-                echo "Optional GitHub secret PREVIEW_SSH_HOST_KEY value:"
+                echo "Optional GitHub secret STAGING_SSH_HOST_KEY value:"
                 echo "$new_key"
               fi
             '';
@@ -180,8 +185,8 @@
             body = infraPkgs.tfRekey;
           };
 
-          tfPreviewProvision = rainix.mkTask.${system} {
-            name = "tf-preview-provision";
+          tfStagingProvision = rainix.mkTask.${system} {
+            name = "tf-staging-provision";
             additionalBuildInputs = infraPkgs.buildInputs;
             body = infraPkgs.tfPreviewProvision;
           };
@@ -195,11 +200,11 @@
             '';
           };
 
-          resolvePreviewIp = pkgs.writeShellApplication {
-            name = "resolve-preview-ip";
+          resolveStagingIp = pkgs.writeShellApplication {
+            name = "resolve-staging-ip";
             runtimeInputs = infraPkgs.buildInputs;
             text = ''
-              export DEPLOY_ENV=preview
+              export DEPLOY_ENV=staging
               ${infraPkgs.resolveIp}
               echo "$host_ip"
             '';
@@ -214,22 +219,22 @@
             '';
           };
 
-          remotePreview = pkgs.writeShellApplication {
-            name = "remote-preview";
+          remoteStaging = pkgs.writeShellApplication {
+            name = "remote-staging";
             runtimeInputs = infraPkgs.buildInputs ++ [ pkgs.openssh ];
             text = ''
-              export DEPLOY_ENV=preview
+              export DEPLOY_ENV=staging
               ${infraPkgs.resolveIp}
               exec ssh -i "$identity" "root@$host_ip" "$@"
             '';
           };
 
-          previewCreateApiKey = pkgs.writeShellApplication {
-            name = "preview-create-api-key";
+          stagingCreateApiKey = pkgs.writeShellApplication {
+            name = "staging-create-api-key";
             runtimeInputs = infraPkgs.buildInputs ++ [ pkgs.openssh ];
             text = ''
               usage() {
-                echo "usage: preview-create-api-key <label> <owner> [--admin]" >&2
+                echo "usage: staging-create-api-key <label> <owner> [--admin]" >&2
               }
 
               label="''${1:-}"
@@ -246,14 +251,14 @@
                 exit 1
               fi
 
-              export DEPLOY_ENV=preview
+              export DEPLOY_ENV=staging
               ${infraPkgs.resolveIp}
 
               remote_cmd=(
-                /nix/var/nix/profiles/per-service/rest-api/bin/st0x_rest_api
+                /nix/var/nix/profiles/per-service/rest-api/bin/albion_rest_api
                 keys
                 --config
-                /etc/st0x-rest-api/config.toml
+                /etc/albion-rest-api/config.toml
                 create
                 --label
                 "$label"
@@ -290,15 +295,15 @@
               packages.prepSolArtifacts
               packages.resolveIp
               packages.remote
-              packages.remotePreview
-              packages.previewCreateApiKey
-              packages.resolvePreviewIp
+              packages.remoteStaging
+              packages.stagingCreateApiKey
+              packages.resolveStagingIp
               packages.deployNixos
               packages.deployService
               packages.deployAll
-              packages.deployPreviewNixos
-              packages.deployPreviewService
-              packages.deployPreviewAll
+              packages.deployStagingNixos
+              packages.deployStagingService
+              packages.deployStagingAll
             ] ++ rainix.devShells.${system}.default.buildInputs;
         };
       });

@@ -149,4 +149,4 @@ jobs:
           restore-prefixes-first-match: nix-${{ runner.os }}-
           gc-max-store-size-linux: 8G
       - name: Build docs
-        run: nix build .#st0x-docs
+        run: nix build .#albion-docs

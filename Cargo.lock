@@ -56,6 +56,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "albion_rest_api"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "argon2",
+ "async-trait",
+ "base64 0.22.1",
+ "clap",
+ "futures",
+ "moka",
+ "rain-erc 0.1.2",
+ "rain-math-float",
+ "raindex_app_settings",
+ "raindex_bindings",
+ "raindex_common",
+ "raindex_js_api",
+ "rand 0.9.1",
+ "reqwest 0.13.2",
+ "rocket",
+ "rocket_cors",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.12",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber 0.3.19",
+ "tracing-test",
+ "url",
+ "utoipa",
+ "utoipa-swagger-ui",
+ "uuid",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "aliasable"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6978,46 +7020,6 @@ dependencies = [
  "thiserror 2.0.12",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "st0x_rest_api"
-version = "0.1.0"
-dependencies = [
- "alloy",
- "argon2",
- "async-trait",
- "base64 0.22.1",
- "clap",
- "futures",
- "moka",
- "rain-erc 0.1.2",
- "rain-math-float",
- "raindex_app_settings",
- "raindex_bindings",
- "raindex_common",
- "raindex_js_api",
- "rand 0.9.1",
- "reqwest 0.13.2",
- "rocket",
- "rocket_cors",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "tempfile",
- "thiserror 2.0.12",
- "tokio",
- "toml",
- "tracing",
- "tracing-appender",
- "tracing-subscriber 0.3.19",
- "tracing-test",
- "url",
- "utoipa",
- "utoipa-swagger-ui",
- "uuid",
- "wasm-bindgen",
 ]
 
 [[package]]

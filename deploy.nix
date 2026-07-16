@@ -5,7 +5,7 @@ let
   inherit (deploy-rs.lib.${system}) activate;
   profileBase = "/nix/var/nix/profiles/per-service";
 
-  st0xPackage = self.packages.${system}.st0x-rest-api;
+  albionPackage = self.packages.${system}.albion-rest-api;
 
   services = import ./services.nix;
   enabledServices = builtins.attrNames (builtins.removeAttrs services
@@ -14,15 +14,15 @@ let
 
   mkServiceProfile = { name, resetState ? false, dataDir ? null }:
     let
-      markerFile = "/run/st0x/${name}.ready";
+      markerFile = "/run/albion/${name}.ready";
       resetCommands = if resetState then [
-        "rm -f ${dataDir}/st0x.db ${dataDir}/raindex.db"
+        "rm -f ${dataDir}/albion.db ${dataDir}/raindex.db"
       ] else [ ];
-    in activate.custom st0xPackage (builtins.concatStringsSep " && " ([
+    in activate.custom albionPackage (builtins.concatStringsSep " && " ([
       "systemctl stop ${name} || true"
       "rm -f ${markerFile}"
     ] ++ resetCommands ++ [
-      "mkdir -p /run/st0x"
+      "mkdir -p /run/albion"
       "touch ${markerFile}"
       "systemctl restart ${name}"
     ]));
@@ -40,7 +40,7 @@ let
 
 in {
   config = {
-    nodes.st0x-rest-api = {
+    nodes.albion-rest-api = {
       hostname = builtins.getEnv "DEPLOY_HOST";
       sshUser = "root";
       user = "root";
@@ -48,11 +48,12 @@ in {
       profilesOrder = [ "system" ] ++ enabledServices;
 
       profiles = {
-        system.path = activate.nixos self.nixosConfigurations.st0x-rest-api-prod;
+        system.path =
+          activate.nixos self.nixosConfigurations.albion-rest-api-prod;
       } // mkProfiles { };
     };
 
-    nodes.st0x-rest-api-preview = {
+    nodes.albion-rest-api-staging = {
       hostname = builtins.getEnv "DEPLOY_HOST";
       sshUser = "root";
       user = "root";
@@ -60,7 +61,8 @@ in {
       profilesOrder = [ "system" ] ++ enabledServices;
 
       profiles = {
-        system.path = activate.nixos self.nixosConfigurations.st0x-rest-api-preview;
+        system.path =
+          activate.nixos self.nixosConfigurations.albion-rest-api-staging;
       } // mkProfiles { };
     };
   };
@@ -70,15 +72,25 @@ in {
       deployInputs = infraPkgs.buildInputs
         ++ [ deploy-rs.packages.${localSystem}.deploy-rs ];
 
+      # If DEPLOY_HOST is already set (e.g. staging, which has no terraform
+      # state entry), use it directly and skip terraform IP resolution. This is
+      # what makes both prod (terraform-resolved) and staging (env-provided)
+      # deploys work through the same wrappers. Only `parseIdentity` runs in the
+      # short-circuit path so `$identity`/`ssh_flag` are still populated.
       deployPreamble = ''
-        ${infraPkgs.resolveIp}
+        ${infraPkgs.parseIdentity}
+        if [ -n "''${DEPLOY_HOST:-}" ]; then
+          host_ip="$DEPLOY_HOST"
+        else
+          ${infraPkgs.resolveIp}
+        fi
         export DEPLOY_HOST="$host_ip"
         export NIX_SSHOPTS="-i $identity"
         ssh_flag="--ssh-opts=-i $identity"
       '';
 
-      previewDeployPreamble = ''
-        export DEPLOY_ENV=preview
+      stagingDeployPreamble = ''
+        export DEPLOY_ENV=staging
         ${deployPreamble}
       '';
 
@@ -93,7 +105,7 @@ in {
         runtimeInputs = deployInputs;
         text = ''
           ${deployPreamble}
-          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} .#st0x-rest-api.system \
+          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} .#albion-rest-api.system \
             -- --impure "$@"
         '';
       };
@@ -105,7 +117,7 @@ in {
           ${deployPreamble}
           profile="''${1:?usage: deploy-service <profile>}"
           shift
-          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} ".#st0x-rest-api.$profile" \
+          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} ".#albion-rest-api.$profile" \
             -- --impure "$@"
         '';
       };
@@ -115,39 +127,39 @@ in {
         runtimeInputs = deployInputs;
         text = ''
           ${deployPreamble}
-          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} .#st0x-rest-api \
+          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} .#albion-rest-api \
             -- --impure "$@"
         '';
       };
 
-      deployPreviewNixos = pkgs.writeShellApplication {
-        name = "deploy-preview-nixos";
+      deployStagingNixos = pkgs.writeShellApplication {
+        name = "deploy-staging-nixos";
         runtimeInputs = deployInputs;
         text = ''
-          ${previewDeployPreamble}
-          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} .#st0x-rest-api-preview.system \
+          ${stagingDeployPreamble}
+          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} .#albion-rest-api-staging.system \
             -- --impure "$@"
         '';
       };
 
-      deployPreviewService = pkgs.writeShellApplication {
-        name = "deploy-preview-service";
+      deployStagingService = pkgs.writeShellApplication {
+        name = "deploy-staging-service";
         runtimeInputs = deployInputs;
         text = ''
-          ${previewDeployPreamble}
+          ${stagingDeployPreamble}
           profile="''${1:-rest-api}"
           shift || true
-          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} ".#st0x-rest-api-preview.$profile" \
+          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} ".#albion-rest-api-staging.$profile" \
             -- --impure "$@"
         '';
       };
 
-      deployPreviewAll = pkgs.writeShellApplication {
-        name = "deploy-preview-all";
+      deployStagingAll = pkgs.writeShellApplication {
+        name = "deploy-staging-all";
         runtimeInputs = deployInputs;
         text = ''
-          ${previewDeployPreamble}
-          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} .#st0x-rest-api-preview \
+          ${stagingDeployPreamble}
+          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} .#albion-rest-api-staging \
             -- --impure "$@"
         '';
       };

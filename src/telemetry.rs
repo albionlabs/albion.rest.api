@@ -11,9 +11,9 @@ pub fn init(log_dir: &str) -> Result<WorkerGuard, String> {
     TELEMETRY_INIT.call_once(|| {
         let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|e| {
             eprintln!("invalid RUST_LOG filter, using default: {e}");
-            EnvFilter::new("st0x_rest_api=info,rocket=warn,warn")
+            EnvFilter::new("albion_rest_api=info,rocket=warn,warn")
         });
-        let file_appender = tracing_appender::rolling::daily(&log_dir, "st0x-rest-api.log");
+        let file_appender = tracing_appender::rolling::daily(&log_dir, "albion-rest-api.log");
         let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
 
         let init_result = tracing_subscriber::registry()

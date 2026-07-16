@@ -1,5 +1,5 @@
 [package]
-name = "st0x_rest_api"
+name = "albion_rest_api"
 version = "0.1.0"
 edition = "2021"
 
@@ -32,6 +32,8 @@ moka = { version = "0.12", features = ["future"] }
 toml = "0.8"
 reqwest = { version = "0.13.2", features = ["json", "stream"] }
 sha2 = "0.10"
+serde_yaml = "0.9"
+rusqlite = { version = "0.32" }
 rain_orderbook_js_api = { package = "raindex_js_api", path = "lib/rain.orderbook/crates/js_api", default-features = false }
 rain_orderbook_common = { package = "raindex_common", path = "lib/rain.orderbook/crates/common", default-features = false }
 rain_orderbook_app_settings = { package = "raindex_app_settings", path = "lib/rain.orderbook/crates/settings", default-features = false }

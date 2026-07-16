@@ -11,7 +11,7 @@ echo "Preparing orderbook Solidity artifacts..."
 nix run .#prepSolArtifacts
 
 echo "Building docs..."
-nix build .#st0x-docs
+nix build .#albion-docs
 rm -rf docs/book
 cp -r result docs/book
 

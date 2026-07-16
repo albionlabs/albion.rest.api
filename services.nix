@@ -1,4 +1,4 @@
 {
   rest-api.enabled = true;
-  rest-api.bin = "st0x_rest_api";
+  rest-api.bin = "albion_rest_api";
 }
