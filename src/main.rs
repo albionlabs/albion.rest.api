@@ -422,7 +422,7 @@ async fn main() {
                     config
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "failed to load raindex registry");
+                    tracing::error!(error = ?e, "failed to load raindex registry");
                     drop(log_guard);
                     std::process::exit(1);
                 }
