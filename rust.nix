@@ -18,6 +18,15 @@ let
     cargoLock = ./Cargo.lock;
   };
 
+  # utoipa-swagger-ui's build script downloads the Swagger UI dist zip at
+  # compile time, which fails inside the networkless nix build sandbox.
+  # Pre-fetch it and hand it over via SWAGGER_UI_DOWNLOAD_URL (file:// path).
+  swaggerUiZip = pkgs.fetchurl {
+    url =
+      "https://github.com/swagger-api/swagger-ui/archive/refs/tags/v5.17.14.zip";
+    sha256 = "1p6cf4zf3jrswqa9b7wwgxhp3ca2v5qrzxzfp8gv35r0h78484j8";
+  };
+
   commonArgs = {
     pname = "albion-rest-api";
     version = "0.1.0";
@@ -32,6 +41,7 @@ let
       [ pkgs.apple-sdk_15 ];
 
     COMMIT_SHA = builtins.getEnv "COMMIT_SHA";
+    SWAGGER_UI_DOWNLOAD_URL = "file://${swaggerUiZip}";
 
     postUnpack = ''
       rm -rf $sourceRoot/lib
