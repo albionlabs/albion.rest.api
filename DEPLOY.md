@@ -11,7 +11,7 @@ inside the Nix dev shell.
 | Environment | nixosConfiguration        | virtualHost               | Data location                                                          |
 | ----------- | ------------------------- | ------------------------- | ---------------------------------------------------------------------- |
 | **prod**    | `albion-rest-api-prod`    | `api.albionlabs.org`      | root filesystem, `/mnt/data/albion-rest-api` (no DO block volume)      |
-| **staging** | `albion-rest-api-staging` | `138-68-167-234.sslip.io` | DO block volume `albion-rest-api-staging-data`, mounted at `/mnt/data` |
+| **staging** | `albion-rest-api-staging` | `api.staging.albionlabs.org` | DO block volume `albion-rest-api-staging-data`, mounted at `/mnt/data` |
 
 Notes:
 

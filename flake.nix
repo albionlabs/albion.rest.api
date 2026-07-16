@@ -62,7 +62,7 @@
       # including the attached DO block volume "albion-rest-api-staging-data".
       nixosConfigurations.albion-rest-api-staging = mkNixosConfiguration {
         name = "staging";
-        virtualHost = "138-68-167-234.sslip.io";
+        virtualHost = "api.staging.albionlabs.org";
         configFile = ./config/staging.toml;
         dataDir = "/mnt/data/albion-rest-api-staging";
         dataVolumeName = "albion-rest-api-staging-data";
