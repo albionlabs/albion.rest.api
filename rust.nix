@@ -41,7 +41,15 @@ let
       [ pkgs.apple-sdk_15 ];
 
     COMMIT_SHA = builtins.getEnv "COMMIT_SHA";
-    SWAGGER_UI_DOWNLOAD_URL = "file://${swaggerUiZip}";
+
+    # Stage a WRITABLE copy of the zip: build.rs fs::copy preserves the source
+    # mode, and cargo runs the build script more than once per build — a 0444
+    # store path would make the second copy fail with PermissionDenied.
+    preConfigure = ''
+      cp ${swaggerUiZip} "$TMPDIR/swagger-ui.zip"
+      chmod 644 "$TMPDIR/swagger-ui.zip"
+      export SWAGGER_UI_DOWNLOAD_URL="file://$TMPDIR/swagger-ui.zip"
+    '';
 
     postUnpack = ''
       rm -rf $sourceRoot/lib
