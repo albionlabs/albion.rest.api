@@ -46,3 +46,20 @@ url = "2"
 [dev-dependencies]
 tracing-test = "0.2"
 tempfile = "3"
+httpmock = "0.7.0"
+# Fork-based swap-calldata integration test (tests/swap_calldata_fork.rs) drives
+# an anvil Base fork via alloy's node bindings and submits the constructed swap
+# calldata as real transactions. These features are test-only, hence pinned here
+# rather than in the runtime `alloy` dependency above.
+alloy = { version = "=1.8.3", default-features = false, features = [
+  "std",
+  "serde",
+  "providers",
+  "provider-anvil-api",
+  "node-bindings",
+  "network",
+  "rpc-types",
+  "signer-local",
+  "sol-types",
+  "contract",
+] }
