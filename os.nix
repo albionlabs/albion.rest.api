@@ -11,6 +11,30 @@ let
     # null when the host has no attached DigitalOcean block volume (prod runs
     # on the droplet root filesystem). Non-null enables the /mnt/data mount.
     dataVolumeName = null;
+
+    # Hardware/platform layer. Defaults describe a DigitalOcean droplet so
+    # prod and the existing staging droplet are unaffected; the GCE host
+    # overrides all three. Kept as module functions rather than raw paths so
+    # `modulesPath` stays in scope for the caller in flake.nix.
+    platformModules = [
+      ({ modulesPath, lib, ... }: {
+        imports = [
+          (modulesPath + "/virtualisation/digital-ocean-config.nix")
+          (modulesPath + "/profiles/qemu-guest.nix")
+        ];
+        # DO hands out addressing through cloud-init (and the staging droplet
+        # pins it statically), so per-interface DHCP is off. This is a
+        # DigitalOcean assumption, not a general one — GCE requires DHCP
+        # against the metadata server, so it must not leak into other hosts.
+        networking.useDHCP = lib.mkForce false;
+      })
+    ];
+    # Disk that disko partitions. DO droplets expose virtio (/dev/vda); GCE
+    # persistent disks enumerate as /dev/sda.
+    diskDevice = "/dev/vda";
+    # DigitalOcean supplies host config through cloud-init. GCE uses the
+    # google-guest-agent instead, so the cloud-init stack is dropped there.
+    cloudInit = true;
   } // albionEnv;
 
   services = import ./services.nix;
@@ -52,21 +76,17 @@ let
     };
 
 in {
-  imports = [
-    (modulesPath + "/virtualisation/digital-ocean-config.nix")
-    (modulesPath + "/profiles/qemu-guest.nix")
-    ./disko.nix
-  ];
+  imports = env.platformModules ++ [ ./disko.nix ];
+
+  disko.devices.disk.primary.device = env.diskDevice;
 
   boot.loader.grub = {
     efiSupport = true;
     efiInstallAsRemovable = true;
   };
 
-  networking.useDHCP = lib.mkForce false;
-
   services = {
-    cloud-init = {
+    cloud-init = lib.mkIf env.cloudInit {
       enable = true;
       network.enable = true;
       settings = {

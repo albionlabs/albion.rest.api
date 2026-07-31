@@ -53,6 +53,21 @@ in {
       } // mkProfiles { };
     };
 
+    # Staging on GCE. Like the staging droplet it has no Terraform state
+    # entry, so the host is supplied through DEPLOY_HOST.
+    nodes.albion-rest-api-staging-gce = {
+      hostname = builtins.getEnv "DEPLOY_HOST";
+      sshUser = "root";
+      user = "root";
+
+      profilesOrder = [ "system" ] ++ enabledServices;
+
+      profiles = {
+        system.path =
+          activate.nixos self.nixosConfigurations.albion-rest-api-staging-gce;
+      } // mkProfiles { };
+    };
+
     nodes.albion-rest-api-staging = {
       hostname = builtins.getEnv "DEPLOY_HOST";
       sshUser = "root";
@@ -160,6 +175,38 @@ in {
         text = ''
           ${stagingDeployPreamble}
           deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} .#albion-rest-api-staging \
+            -- --impure "$@"
+        '';
+      };
+
+      deployStagingGceNixos = pkgs.writeShellApplication {
+        name = "deploy-staging-gce-nixos";
+        runtimeInputs = deployInputs;
+        text = ''
+          ${stagingDeployPreamble}
+          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} .#albion-rest-api-staging-gce.system \
+            -- --impure "$@"
+        '';
+      };
+
+      deployStagingGceService = pkgs.writeShellApplication {
+        name = "deploy-staging-gce-service";
+        runtimeInputs = deployInputs;
+        text = ''
+          ${stagingDeployPreamble}
+          profile="''${1:-rest-api}"
+          shift || true
+          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} ".#albion-rest-api-staging-gce.$profile" \
+            -- --impure "$@"
+        '';
+      };
+
+      deployStagingGceAll = pkgs.writeShellApplication {
+        name = "deploy-staging-gce-all";
+        runtimeInputs = deployInputs;
+        text = ''
+          ${stagingDeployPreamble}
+          deploy ${deployFlags} ''${ssh_flag:+"$ssh_flag"} .#albion-rest-api-staging-gce \
             -- --impure "$@"
         '';
       };
