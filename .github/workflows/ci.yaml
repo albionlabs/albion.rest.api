@@ -43,6 +43,8 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: target/${{ matrix.cache_target }}
       COMMIT_SHA: ${{ github.sha }}
+      BASE_FORK_RPC_URL: https://base.gateway.tenderly.co
+      REQUIRE_SWAP_FORK_TESTS: "1"
     steps:
       - uses: actions/checkout@v6
         with:

@@ -3,16 +3,14 @@
 //!
 //! ## What this proves
 //!
-//! The unit tests in `src/routes/swap/calldata.rs` assert only the *shape* of
-//! the swap calldata (`to == orderbook`, non-empty `data`, `value == 0`,
-//! approvals present). They mock the datasource, so they never prove the bytes
-//! the API hands a client will actually fill an order when submitted to the
-//! chain. This test closes that gap: it drives the exact calldata-construction
-//! path the `/v1/swap/calldata` route uses
-//! (`RaindexClient::get_take_orders_calldata`, wrapped by
-//! `RaindexSwapDataSource::get_calldata`) against an **anvil fork of Base**,
-//! then submits the resulting `{to, data, value}` (and approval) as real
-//! transactions and asserts on-chain effects.
+//! The unit tests in `src/routes/swap/calldata.rs` assert the route's response
+//! shape with a mocked datasource. They cannot prove the bytes the API hands a
+//! client will actually fill an order when submitted to the chain. This test
+//! closes that gap: it POSTs to the real `/v2/swap/calldata` Rocket route,
+//! authenticates with a real test API key, drives the production
+//! `RaindexSwapDataSource` against an **anvil fork of Base**, then submits the
+//! returned `{to, data, value}` (and approval) as real transactions and asserts
+//! on-chain effects.
 //!
 //! ## Design: replay a real live order against a fork (with a topped-up vault)
 //!
@@ -46,25 +44,28 @@
 //!
 //! ## Env gating
 //!
-//! The test forks Base via `BASE_FORK_RPC_URL` (default
-//! `https://base.publicnode.com`). If the fork RPC is unset/unreachable or the
-//! pinned (archive-depth) block cannot be forked, the test **skips** rather than
-//! fails, mirroring how the repo keeps network-dependent tests green on CI
-//! forks without an archive RPC. For archive depth locally, set
-//! `BASE_FORK_RPC_URL` to an Alchemy/dRPC Base URL.
+//! The test forks Base via `BASE_FORK_RPC_URL` (defaulting to Tenderly's public
+//! Base gateway). If the fork RPC is unreachable locally, the test skips. CI
+//! sets `REQUIRE_SWAP_FORK_TESTS=1`, which turns that condition into a hard
+//! failure so this coverage can never silently disappear.
 
+use crate::raindex::RaindexProvider;
+use crate::test_helpers::{
+    basic_auth_header, mock_raindex_registry_url_with_settings, seed_api_key, TestClientBuilder,
+};
+use crate::types::swap::{SwapCalldataMode, SwapCalldataResponse};
 use alloy::network::TransactionBuilder;
-use alloy::primitives::{address, keccak256, Address, Bytes, B256, U256};
+use alloy::primitives::{address, keccak256, Address, B256, U256};
 use alloy::providers::ext::AnvilApi;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::sol;
 use alloy::sol_types::{SolCall, SolValue};
 use httpmock::MockServer;
-use rain_orderbook_common::raindex_client::take_orders::TakeOrdersRequest;
-use rain_orderbook_common::raindex_client::{RaindexClient, RaindexError};
-use rain_orderbook_common::take_orders::TakeOrdersMode;
+use rocket::http::{ContentType, Header, Status};
+use rocket::local::asynchronous::Client;
 use serde_json::json;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Pinned fork parameters (Base mainnet, chain id 8453)
@@ -90,7 +91,8 @@ const USDC_BALANCES_SLOT: u64 = 9;
 const BUY_TOKEN: Address = address!("f836a500910453A397084ADe41321ee20a5AAde1");
 
 fn default_fork_rpc() -> String {
-    std::env::var("BASE_FORK_RPC_URL").unwrap_or_else(|_| "https://base.publicnode.com".to_string())
+    std::env::var("BASE_FORK_RPC_URL")
+        .unwrap_or_else(|_| "https://base.gateway.tenderly.co".to_string())
 }
 
 sol! {
@@ -127,7 +129,7 @@ sol! {
 /// The captured real order, as the production subgraph returns it. We serve
 /// `orderBytes` + vault/token metadata; on-chain state (fork) governs fills.
 fn fixture_order_json() -> serde_json::Value {
-    let raw = include_str!("fixtures/alb_usdc_order.json");
+    let raw = include_str!("../../../tests/fixtures/alb_usdc_order.json");
     serde_json::from_str(raw).expect("valid fixture order json")
 }
 
@@ -235,6 +237,19 @@ raindexes:
         subgraph: base
         local-db-remote: remote
         deployment-block: 0
+tokens:
+    usdc:
+        address: {USDC}
+        network: base
+        decimals: 6
+        label: USD Coin
+        symbol: USDC
+    alb-wr1-r1:
+        address: {BUY_TOKEN}
+        network: base
+        decimals: 18
+        label: Albion WR1 R1
+        symbol: ALB-WR1-R1
 "#
     )
 }
@@ -258,13 +273,22 @@ fn start_mock_subgraph() -> (MockServer, String) {
 /// or non-archive RPC that can't serve the pinned block) — retried once for
 /// transient failures.
 async fn try_spawn_fork() -> Option<ForkHarness> {
+    let mut last_error = None;
     for attempt in 1..=2 {
         match spawn_fork_once().await {
             Ok(harness) => return Some(harness),
             Err(e) => {
                 eprintln!("[swap_calldata_fork] fork spawn attempt {attempt}/2 failed: {e}");
+                last_error = Some(e);
             }
         }
+    }
+
+    if std::env::var("REQUIRE_SWAP_FORK_TESTS").as_deref() == Ok("1") {
+        panic!(
+            "swap fork tests are required but Anvil could not start: {}",
+            last_error.unwrap_or_else(|| "unknown fork error".to_string())
+        );
     }
     None
 }
@@ -359,13 +383,22 @@ async fn spawn_fork_once() -> Result<ForkHarness, String> {
 }
 
 impl ForkHarness {
-    /// Builds a `RaindexClient` whose RPC points at this fork and whose subgraph
-    /// points at `sg_url` — the exact wiring `RaindexProvider::load` produces.
-    async fn raindex_client(&self, sg_url: &str) -> RaindexClient {
+    /// Builds the real Rocket application around a `RaindexProvider` whose RPC
+    /// points at this fork and whose subgraph points at `sg_url`. Returns an
+    /// authenticated local HTTP client so tests exercise routing, JSON, auth,
+    /// production datasource mapping, and calldata generation together.
+    async fn api_client(&self, sg_url: &str) -> (Client, String) {
         let yaml = fork_settings_yaml(&self.endpoint, sg_url);
-        RaindexClient::new(vec![yaml], None, None)
+        let registry_url = mock_raindex_registry_url_with_settings(&yaml).await;
+        let raindex = RaindexProvider::load(&registry_url, None, HashMap::new())
             .await
-            .expect("build RaindexClient from fork settings")
+            .expect("build RaindexProvider from fork settings");
+        let client = TestClientBuilder::new()
+            .raindex_config(raindex)
+            .build()
+            .await;
+        let (key_id, secret) = seed_api_key(&client).await;
+        (client, basic_auth_header(&key_id, &secret))
     }
 
     /// Funds the taker with `amount` USDC by writing the FiatToken balances slot
@@ -515,12 +548,12 @@ impl ForkHarness {
 
     /// Submits every approval transaction in an approval-step response, as the
     /// taker. Errors if any approval reverts.
-    async fn submit_approvals(&self, response: &SwapResponse) -> Result<(), String> {
+    async fn submit_approvals(&self, response: &SwapCalldataResponse) -> Result<(), String> {
         for approval in &response.approvals {
             let tx = TransactionRequest::default()
                 .with_from(self.taker)
                 .with_to(approval.token)
-                .with_input(approval.data.clone());
+                .with_input(approval.approval_data.clone());
             let pending = self
                 .provider
                 .send_transaction(tx)
@@ -539,7 +572,7 @@ impl ForkHarness {
 
     /// Submits the swap `{to, data, value}` as the taker and returns whether the
     /// transaction succeeded (did not revert).
-    async fn submit_swap(&self, response: &SwapResponse) -> Result<bool, String> {
+    async fn submit_swap(&self, response: &SwapCalldataResponse) -> Result<bool, String> {
         let tx = TransactionRequest::default()
             .with_from(self.taker)
             .with_to(response.to)
@@ -564,136 +597,85 @@ impl ForkHarness {
 }
 
 // ---------------------------------------------------------------------------
-// Mirror of the REST route's calldata construction + response mapping.
+// Real HTTP endpoint helpers.
 // ---------------------------------------------------------------------------
 
-/// Local mirror of `SwapCalldataResponse` (the route's DTO). We rebuild it from
-/// `get_take_orders_calldata` exactly as `RaindexSwapDataSource::get_calldata`
-/// does, so submitting it exercises the real API output.
-#[derive(Debug)]
-struct SwapResponse {
-    to: Address,
-    data: Bytes,
-    value: U256,
-    estimated_input: String,
-    approvals: Vec<ApprovalTx>,
-}
-
-#[derive(Debug)]
-struct ApprovalTx {
-    token: Address,
-    spender: Address,
-    data: Bytes,
-}
-
-/// Reproduces `RaindexSwapDataSource::get_calldata` (`src/routes/swap/mod.rs`):
-/// call `get_take_orders_calldata`, then map either the approval info or the
-/// take-orders info into the response the route returns.
-async fn build_swap_response(
-    client: &RaindexClient,
-    req: TakeOrdersRequest,
-) -> Result<SwapResponse, RaindexError> {
-    let result = client.get_take_orders_calldata(req).await?;
-
-    if let Some(approval_info) = result.approval_info() {
-        let formatted_amount = approval_info.formatted_amount().to_string();
-        Ok(SwapResponse {
-            to: approval_info.spender(),
-            data: Bytes::new(),
-            value: U256::ZERO,
-            estimated_input: formatted_amount.clone(),
-            approvals: vec![ApprovalTx {
-                token: approval_info.token(),
-                spender: approval_info.spender(),
-                data: approval_info.calldata().clone(),
-            }],
-        })
-    } else if let Some(take_orders_info) = result.take_orders_info() {
-        let expected_sell = take_orders_info
-            .expected_sell()
-            .format()
-            .map_err(|_| RaindexError::NoLiquidity)?;
-        Ok(SwapResponse {
-            to: take_orders_info.raindex(),
-            data: take_orders_info.calldata().clone(),
-            value: U256::ZERO,
-            estimated_input: expected_sell,
-            approvals: vec![],
-        })
-    } else {
-        Err(RaindexError::NoLiquidity)
-    }
-}
-
-/// Builds the `TakeOrdersRequest` exactly as `process_swap_calldata_build`
-/// (`src/routes/swap/calldata.rs`) does for a wrapped-denomination request.
-fn take_orders_request(
+fn calldata_request(
     taker: Address,
-    sell_token: Address,
-    buy_token: Address,
-    mode: TakeOrdersMode,
+    mode: SwapCalldataMode,
     amount: &str,
     price_cap: &str,
-) -> TakeOrdersRequest {
-    TakeOrdersRequest {
-        taker: taker.to_string(),
-        chain_id: CHAIN_ID,
-        sell_token: sell_token.to_string(),
-        buy_token: buy_token.to_string(),
-        mode,
-        amount: amount.to_string(),
-        price_cap: price_cap.to_string(),
-    }
+) -> serde_json::Value {
+    json!({
+        "taker": taker,
+        "inputToken": USDC,
+        "outputToken": BUY_TOKEN,
+        "mode": mode,
+        "amount": amount,
+        "priceCap": price_cap,
+        "denomination": "wrapped"
+    })
+}
+
+async fn post_calldata(
+    client: &Client,
+    auth_header: &str,
+    request: &serde_json::Value,
+) -> (Status, String) {
+    let response = client
+        .post("/v2/swap/calldata")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", auth_header.to_string()))
+        .body(request.to_string())
+        .dispatch()
+        .await;
+    let status = response.status();
+    let body = response.into_string().await.unwrap_or_default();
+    (status, body)
+}
+
+fn successful_calldata(status: Status, body: &str) -> SwapCalldataResponse {
+    assert_eq!(
+        status,
+        Status::Ok,
+        "expected calldata response, body: {body}"
+    );
+    serde_json::from_str(body).expect("deserialize SwapCalldataResponse from real route")
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Case 1 — Buy with approval executes.
+/// Case 1 — the UI's `spendUpTo` approval + swap flow executes end to end.
 ///
-/// A fresh taker (no USDC allowance to the orderbook) requests a small BUY_TOKEN buy.
-/// The API returns an approval first; we submit it, then the swap. Asserts:
-/// taker's BUY_TOKEN balance increased, USDC decreased by ~estimated_input, and the
-/// order's BUY_TOKEN output vault was debited.
+/// A fresh taker POSTs to the real endpoint with no USDC allowance. The API
+/// returns an approval; the test submits it, POSTs the same request again, then
+/// submits the returned swap and verifies balances and the maker vault.
 #[tokio::test]
-async fn buy_with_approval_executes_on_fork() {
+async fn spend_up_to_endpoint_executes_approval_then_swap_on_fork() {
     let Some(harness) = try_spawn_fork().await else {
         eprintln!(
-            "[swap_calldata_fork] SKIP buy_with_approval_executes_on_fork: \
+            "[swap_calldata_fork] SKIP spend_up_to_endpoint_executes_approval_then_swap_on_fork: \
              set BASE_FORK_RPC_URL to a reachable Base archive RPC to run it"
         );
         return;
     };
 
     let (_sg, sg_url) = start_mock_subgraph();
-    let client = harness.raindex_client(&sg_url).await;
+    let (client, auth_header) = harness.api_client(&sg_url).await;
 
-    // Fund the taker with 1,000 USDC (6 decimals) — plenty for a tiny buy.
+    // Fund the taker with 1,000 USDC and the replayed maker vault with ALB.
     let usdc_funding = U256::from(1_000u64) * U256::from(10u64).pow(U256::from(6u64));
     harness.fund_taker_usdc(usdc_funding).await;
-
-    // Top up the replayed order's output vault with 10 buy-token so there is
-    // liquidity to fill against on this recent fork block.
     harness
         .fund_order_vault(U256::from(200u64) * U256::from(10u64).pow(U256::from(18u64)))
         .await;
 
-    // Buy up to 0.5 BUY_TOKEN paying USDC (above the order's minimum trade size).
-    // BuyUpTo (partial) fills what is available up to the target.
-    let req = take_orders_request(
-        harness.taker(),
-        USDC,
-        BUY_TOKEN,
-        TakeOrdersMode::BuyUpTo,
-        "5",
-        // Generous price cap so the order's real ratio is well within it.
-        "1000000",
-    );
-
-    let response = build_swap_response(&client, req)
-        .await
-        .expect("calldata build should succeed for funded order");
+    // This is the exact mode used by the Albion UI for a market buy.
+    let request = calldata_request(harness.taker(), SwapCalldataMode::SpendUpTo, "5", "1000000");
+    let (status, body) = post_calldata(&client, &auth_header, &request).await;
+    let response = successful_calldata(status, &body);
 
     // The first response for a fresh taker must be an approval (no allowance).
     assert_eq!(
@@ -707,34 +689,27 @@ async fn buy_with_approval_executes_on_fork() {
         "approval spender is the orderbook"
     );
     assert!(
-        !response.approvals[0].data.is_empty(),
+        !response.approvals[0].approval_data.is_empty(),
         "approval calldata must be non-empty"
     );
+    assert!(
+        response.data.is_empty(),
+        "approval step has no swap calldata"
+    );
 
-    // Submit the approval, then re-request calldata (now allowance exists) to
-    // get the actual swap bytes — mirrors a real client's two-step flow.
+    // Submit the API's approval, then repeat the same HTTP request to get swap bytes.
     harness
         .submit_approvals(&response)
         .await
         .expect("approval submission");
-
-    let req2 = take_orders_request(
-        harness.taker(),
-        USDC,
-        BUY_TOKEN,
-        TakeOrdersMode::BuyUpTo,
-        "5",
-        "1000000",
-    );
-    let swap = build_swap_response(&client, req2)
-        .await
-        .expect("calldata build after approval should succeed");
+    let (status, body) = post_calldata(&client, &auth_header, &request).await;
+    let swap = successful_calldata(status, &body);
 
     assert!(
         swap.approvals.is_empty(),
         "after approval the response should carry swap bytes, not another approval"
     );
-    // Route invariants: to == orderbook, data non-empty, value == 0.
+    // The typed body is the exact JSON contract consumed by the UI.
     assert_eq!(swap.to, ORDERBOOK, "swap target is the orderbook");
     assert!(!swap.data.is_empty(), "swap calldata must be non-empty");
     assert_eq!(swap.value, U256::ZERO, "swap value must be zero");
@@ -782,24 +757,23 @@ async fn buy_with_approval_executes_on_fork() {
     );
 }
 
-/// Case 2 — Slippage cap rejects.
+/// Case 2 — the real endpoint enforces the v2 `priceCap`.
 ///
-/// Build BuyExact calldata but with a `maximumIoRatio` (price cap) tighter than
-/// the order's real ratio. When submitted, the fill can't be satisfied within
-/// the cap, so the take reverts on-chain — proving the cap is enforced by the
-/// actual calldata, not merely the quote.
+/// After approving through the endpoint, POST a `spendExact` request with an
+/// impossible cap. The real handler must either reject it as 400/404 while
+/// building, or return calldata that reverts when executed.
 #[tokio::test]
-async fn slippage_cap_reverts_on_fork() {
+async fn spend_exact_endpoint_enforces_price_cap_on_fork() {
     let Some(harness) = try_spawn_fork().await else {
         eprintln!(
-            "[swap_calldata_fork] SKIP slippage_cap_reverts_on_fork: \
+            "[swap_calldata_fork] SKIP spend_exact_endpoint_enforces_price_cap_on_fork: \
              set BASE_FORK_RPC_URL to a reachable Base archive RPC to run it"
         );
         return;
     };
 
     let (_sg, sg_url) = start_mock_subgraph();
-    let client = harness.raindex_client(&sg_url).await;
+    let (client, auth_header) = harness.api_client(&sg_url).await;
 
     let usdc_funding = U256::from(1_000u64) * U256::from(10u64).pow(U256::from(6u64));
     harness.fund_taker_usdc(usdc_funding).await;
@@ -807,104 +781,90 @@ async fn slippage_cap_reverts_on_fork() {
         .fund_order_vault(U256::from(200u64) * U256::from(10u64).pow(U256::from(18u64)))
         .await;
 
-    // Approve first (isolate the revert to the cap, not a missing allowance).
-    let approve_req = take_orders_request(
-        harness.taker(),
-        USDC,
-        BUY_TOKEN,
-        TakeOrdersMode::BuyUpTo,
-        "5",
-        "1000000",
-    );
-    let approval = build_swap_response(&client, approve_req)
-        .await
-        .expect("approval build");
+    // Approve first through the same API endpoint so the next result is about
+    // the cap, not a missing allowance.
+    let approval_request =
+        calldata_request(harness.taker(), SwapCalldataMode::SpendUpTo, "5", "1000000");
+    let (status, body) = post_calldata(&client, &auth_header, &approval_request).await;
+    let approval = successful_calldata(status, &body);
     assert_eq!(approval.approvals.len(), 1, "expected an approval step");
     harness
         .submit_approvals(&approval)
         .await
         .expect("submit approval");
 
-    // Now build a BuyExact swap with an absurdly tight price cap. BuyExact
-    // requires the full requested amount to fill; with a cap below the order's
-    // ratio the order is skipped, so either the build reports no liquidity or the
-    // submitted tx reverts. Both outcomes prove the cap is enforced end-to-end.
-    let tight_cap = "0.0000000001";
-    let req = take_orders_request(
+    let request = calldata_request(
         harness.taker(),
-        USDC,
-        BUY_TOKEN,
-        TakeOrdersMode::BuyExact,
-        "0.0001",
-        tight_cap,
+        SwapCalldataMode::SpendExact,
+        "1",
+        "0.0000000001",
     );
+    let (status, body) = post_calldata(&client, &auth_header, &request).await;
 
-    match build_swap_response(&client, req).await {
-        Err(e) => {
-            eprintln!(
-                "[swap_calldata_fork] tight cap rejected at build time: {e:?} (cap enforced)"
-            );
-        }
-        Ok(swap) => {
-            // If calldata was produced, submitting it must revert on-chain.
-            let filled = harness.submit_swap(&swap).await.unwrap_or(false);
-            assert!(
-                !filled,
-                "swap under an impossibly tight price cap must revert on-chain, \
-                 proving the cap is baked into the calldata"
-            );
-            eprintln!(
-                "[swap_calldata_fork] tight cap calldata reverted on submission (cap enforced)"
-            );
-        }
+    if status == Status::BadRequest || status == Status::NotFound {
+        eprintln!("[swap_calldata_fork] tight cap rejected by endpoint ({status}): {body}");
+    } else if status == Status::Ok {
+        let swap: SwapCalldataResponse =
+            serde_json::from_str(&body).expect("deserialize tight-cap response");
+        assert!(swap.approvals.is_empty(), "taker is already approved");
+        let filled = harness.submit_swap(&swap).await.unwrap_or(false);
+        assert!(
+            !filled,
+            "swap under an impossibly tight price cap must revert on-chain, \
+             proving the cap is baked into the calldata"
+        );
+        eprintln!("[swap_calldata_fork] tight cap calldata reverted on submission (cap enforced)");
+    } else {
+        panic!("unexpected tight-cap endpoint status {status}, body: {body}");
     }
 }
 
-/// Case 3 — No liquidity.
+/// Case 3 — an oversized exact spend returns the route's no-liquidity error.
 ///
-/// Request a buy far exceeding the order's available output in BuyExact mode.
-/// The calldata builder cannot satisfy the exact amount, so the route's error
-/// path (`RaindexError::{NoLiquidity, InsufficientLiquidity}` → HTTP 404) is
-/// exercised. This is a build-level assertion (no on-chain submission needed),
-/// but it still runs against the real forked vault balance.
+/// The first request can legitimately be the approval phase. If so, submit it
+/// and repeat the request; the authenticated v2 endpoint must then map
+/// insufficient liquidity to HTTP 404.
 #[tokio::test]
-async fn no_liquidity_for_oversized_buy_on_fork() {
+async fn spend_exact_endpoint_returns_404_for_insufficient_liquidity_on_fork() {
     let Some(harness) = try_spawn_fork().await else {
         eprintln!(
-            "[swap_calldata_fork] SKIP no_liquidity_for_oversized_buy_on_fork: \
+            "[swap_calldata_fork] SKIP spend_exact_endpoint_returns_404_for_insufficient_liquidity_on_fork: \
              set BASE_FORK_RPC_URL to a reachable Base archive RPC to run it"
         );
         return;
     };
 
     let (_sg, sg_url) = start_mock_subgraph();
-    let client = harness.raindex_client(&sg_url).await;
+    let (client, auth_header) = harness.api_client(&sg_url).await;
 
-    // Fund the vault with a modest 10 buy-token: enough for the order to quote,
-    // far short of the oversized exact buy below.
+    let usdc_funding = U256::from(200_000_000u64) * U256::from(10u64).pow(U256::from(6u64));
+    harness.fund_taker_usdc(usdc_funding).await;
     harness
         .fund_order_vault(U256::from(200u64) * U256::from(10u64).pow(U256::from(18u64)))
         .await;
 
-    // Buy an amount of BUY_TOKEN far larger than the funded vault balance, exact.
-    let req = take_orders_request(
+    let request = calldata_request(
         harness.taker(),
-        USDC,
-        BUY_TOKEN,
-        TakeOrdersMode::BuyExact,
+        SwapCalldataMode::SpendExact,
         "100000000",
         "1000000",
     );
+    let (mut status, mut body) = post_calldata(&client, &auth_header, &request).await;
+    if status == Status::Ok {
+        let approval: SwapCalldataResponse =
+            serde_json::from_str(&body).expect("deserialize approval response");
+        assert_eq!(
+            approval.approvals.len(),
+            1,
+            "first phase should be approval"
+        );
+        harness
+            .submit_approvals(&approval)
+            .await
+            .expect("submit oversized-request approval");
+        (status, body) = post_calldata(&client, &auth_header, &request).await;
+    }
 
-    let result = build_swap_response(&client, req).await;
-    assert!(
-        matches!(
-            result,
-            Err(RaindexError::NoLiquidity) | Err(RaindexError::InsufficientLiquidity { .. })
-        ),
-        "oversized exact buy should report no/insufficient liquidity, got: {result:?}"
-    );
-    eprintln!(
-        "[swap_calldata_fork] oversized exact buy correctly reported no/insufficient liquidity"
-    );
+    assert_eq!(status, Status::NotFound, "unexpected body: {body}");
+    eprintln!("[swap_calldata_fork] oversized exact spend correctly returned HTTP 404: {body}");
 }
