@@ -39,6 +39,8 @@ pub struct TradesByTxParams {
 pub struct TradeByAddress {
     #[schema(value_type = String, example = "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab")]
     pub tx_hash: FixedBytes<32>,
+    #[schema(value_type = String, example = "0x0000000000000000000000000000000000000001")]
+    pub sender: Address,
     #[schema(example = "1000000")]
     pub input_amount: String,
     #[schema(example = "500000")]

@@ -134,7 +134,7 @@ mod tests {
     use super::*;
     use crate::routes::order::test_fixtures::trade_json;
     use crate::test_helpers::{basic_auth_header, seed_api_key, TestClientBuilder};
-    use alloy::primitives::{b256, Address};
+    use alloy::primitives::{address, b256, Address};
     use async_trait::async_trait;
     use rain_orderbook_common::raindex_client::trades::RaindexTradesListResult;
     use rain_orderbook_common::raindex_client::types::{PaginationParams, TimeFilter};
@@ -253,6 +253,10 @@ mod tests {
         assert_eq!(response.trades_by_order_hash.len(), 2);
         assert_eq!(response.trades_by_order_hash[0].order_hash, hash_a());
         assert_eq!(response.trades_by_order_hash[0].trades.len(), 1);
+        assert_eq!(
+            response.trades_by_order_hash[0].trades[0].sender,
+            address!("0000000000000000000000000000000000000002")
+        );
         assert_eq!(response.trades_by_order_hash[1].order_hash, hash_b());
         assert!(response.trades_by_order_hash[1].trades.is_empty());
 

@@ -247,6 +247,7 @@ pub(super) fn map_trade_for_list(
 
     Ok(TradeByAddress {
         tx_hash,
+        sender: trade.transaction().from(),
         input_amount,
         output_amount,
         input_token: TokenRef {
