@@ -107,6 +107,9 @@
       nixosConfigurations.albion-rest-api-staging-gce = mkNixosConfiguration {
         name = "staging";
         virtualHost = "api.staging.albionlabs.org";
+        # Keep the staging hostname as a rollback path while the stable
+        # production hostname moves from DigitalOcean to this GCE instance.
+        virtualHostAliases = [ "api.albionlabs.org" ];
         configFile = ./config/staging.toml;
         dataDir = "/mnt/data/albion-rest-api-staging";
         dataVolumeName = null;

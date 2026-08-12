@@ -6,6 +6,7 @@ let
   env = {
     name = "prod";
     virtualHost = "api.albionlabs.org";
+    virtualHostAliases = [ ];
     configFile = ./config/prod.toml;
     dataDir = "/mnt/data/albion-rest-api";
     # null when the host has no attached DigitalOcean block volume (prod runs
@@ -36,6 +37,44 @@ let
     # google-guest-agent instead, so the cloud-init stack is dropped there.
     cloudInit = true;
   } // albionEnv;
+
+  apiVirtualHost = {
+    enableACME = true;
+    forceSSL = true;
+
+    extraConfig = ''
+      # Security headers
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-Frame-Options "DENY" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+      # Allow private registry artifact uploads while keeping request bodies bounded.
+      client_max_body_size 5m;
+    '';
+
+    # Block common exploit scanners (PHP, Docker, ThinkPHP, etc.)
+    locations."~* \\.(php|asp|aspx|jsp|cgi)$" = {
+      return = "444";
+    };
+    locations."~* ^/(containers|_ignition|vendor|public/index)" = {
+      return = "444";
+    };
+
+    locations."/" = {
+      proxyPass = "http://127.0.0.1:8000";
+      extraConfig = ''
+        limit_req zone=api burst=20 nodelay;
+        limit_req_status 429;
+      '';
+    };
+  };
+
+  apiVirtualHosts = builtins.listToAttrs (
+    map (host: {
+      name = host;
+      value = apiVirtualHost;
+    }) (lib.unique ([ env.virtualHost ] ++ env.virtualHostAliases))
+  );
 
   services = import ./services.nix;
   enabledServices = lib.filterAttrs (_: v: v.enabled) services;
@@ -145,36 +184,7 @@ in {
         limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
       '';
 
-      virtualHosts.${env.virtualHost} = {
-        enableACME = true;
-        forceSSL = true;
-
-        extraConfig = ''
-          # Security headers
-          add_header X-Content-Type-Options "nosniff" always;
-          add_header X-Frame-Options "DENY" always;
-          add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-
-          # Allow private registry artifact uploads while keeping request bodies bounded.
-          client_max_body_size 5m;
-        '';
-
-        # Block common exploit scanners (PHP, Docker, ThinkPHP, etc.)
-        locations."~* \\.(php|asp|aspx|jsp|cgi)$" = {
-          return = "444";
-        };
-        locations."~* ^/(containers|_ignition|vendor|public/index)" = {
-          return = "444";
-        };
-
-        locations."/" = {
-          proxyPass = "http://127.0.0.1:8000";
-          extraConfig = ''
-            limit_req zone=api burst=20 nodelay;
-            limit_req_status 429;
-          '';
-        };
-      };
+      virtualHosts = apiVirtualHosts;
     };
   };
 
