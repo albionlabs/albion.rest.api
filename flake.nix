@@ -97,6 +97,53 @@
         ];
       };
 
+      # Staging on Google Compute Engine (project albion-rest-api-1, VM
+      # albion-rest-api-staging in europe-west3-b, static IP 34.185.191.70).
+      # Runs the same service/nginx/ACME modules as the droplet — only the
+      # hardware layer differs. Data lives on the 40GiB pd-balanced root disk
+      # at the same path the droplet uses, so the copied SQLite files and the
+      # logrotate/tmpfiles rules line up exactly; there is no second volume,
+      # hence dataVolumeName = null.
+      nixosConfigurations.albion-rest-api-staging-gce = mkNixosConfiguration {
+        name = "staging";
+        virtualHost = "api.staging.albionlabs.org";
+        # Keep the staging hostname as a rollback path while the stable
+        # production hostname moves from DigitalOcean to this GCE instance.
+        virtualHostAliases = [ "api.albionlabs.org" ];
+        configFile = ./config/staging.toml;
+        dataDir = "/mnt/data/albion-rest-api-staging";
+        dataVolumeName = null;
+
+        platformModules = [
+          (
+            { modulesPath, lib, ... }:
+            {
+              imports = [ (modulesPath + "/virtualisation/google-compute-config.nix") ];
+
+              # google-compute-config.nix hard-codes the root filesystem to
+              # the label GCE's own images use. disko owns the partition
+              # table here, so point / at the partition disko actually
+              # creates — without mkForce this is a conflicting-definition
+              # eval error against disko's own fileSystems entry.
+              fileSystems."/".device =
+                lib.mkForce "/dev/disk/by-partlabel/disk-primary-root";
+
+              # Root logs in with the keys.nix `roles.ssh` set, exactly as on
+              # the droplet. OS Login is not enforced by org policy on
+              # albionlabs.org, and enabling it would route authentication
+              # through the guest agent instead.
+              security.googleOsLogin.enable = lib.mkForce false;
+            }
+          )
+        ];
+
+        # GCE persistent disks enumerate as /dev/sda, not virtio /dev/vda.
+        diskDevice = "/dev/sda";
+
+        # No cloud-init on GCE; google-guest-agent handles metadata.
+        cloudInit = false;
+      };
+
       nixosConfigurations.albion-rest-api = self.nixosConfigurations.albion-rest-api-prod;
 
       deploy = (import ./deploy.nix { inherit deploy-rs self; }).config;
@@ -364,6 +411,9 @@
               packages.deployStagingNixos
               packages.deployStagingService
               packages.deployStagingAll
+              packages.deployStagingGceNixos
+              packages.deployStagingGceService
+              packages.deployStagingGceAll
             ]
             ++ rainix.devShells.${system}.default.buildInputs;
         };

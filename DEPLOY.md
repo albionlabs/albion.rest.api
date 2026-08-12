@@ -1,17 +1,19 @@
-# Digital Ocean Deployment Guide
+# Deployment Guide
 
-This project deploys a NixOS droplet on DigitalOcean via Terraform, then
-installs the service using `nixos-anywhere` and `deploy-rs`. All tooling runs
-inside the Nix dev shell.
+This project deploys NixOS hosts via `nixos-anywhere` and `deploy-rs`. All
+tooling runs inside the Nix dev shell. Prod and the original staging host are
+DigitalOcean droplets provisioned through Terraform; staging is being migrated
+to Google Compute Engine (see "Staging on GCE" below).
 
 ---
 
 ## Albion environments
 
-| Environment | nixosConfiguration        | virtualHost               | Data location                                                          |
-| ----------- | ------------------------- | ------------------------- | ---------------------------------------------------------------------- |
-| **prod**    | `albion-rest-api-prod`    | `api.albionlabs.org`      | root filesystem, `/mnt/data/albion-rest-api` (no DO block volume)      |
-| **staging** | `albion-rest-api-staging` | `api.staging.albionlabs.org` | DO block volume `albion-rest-api-staging-data`, mounted at `/mnt/data` |
+| Environment      | nixosConfiguration            | virtualHost                  | Data location                                                          |
+| ---------------- | ----------------------------- | ---------------------------- | ---------------------------------------------------------------------- |
+| **prod**         | `albion-rest-api-prod`        | `api.albionlabs.org`         | root filesystem, `/mnt/data/albion-rest-api` (no DO block volume)      |
+| **staging (DO)** | `albion-rest-api-staging`     | `api.staging.albionlabs.org` | DO block volume `albion-rest-api-staging-data`, mounted at `/mnt/data` |
+| **staging (GCE)**| `albion-rest-api-staging-gce` | `api.staging.albionlabs.org` | root disk, `/mnt/data/albion-rest-api-staging` (no separate volume)    |
 
 Notes:
 
@@ -29,6 +31,125 @@ Notes:
   `[additional_rpcs]` config table via `${VAR}`) are supplied to the service via
   `EnvironmentFile=/etc/albion/<name>.env` (e.g. `/etc/albion/prod.env`). The
   leading `-` makes a missing file non-fatal on first boot.
+- **The hardware layer is pluggable.** `os.nix` takes `platformModules`,
+  `diskDevice` and `cloudInit` through `albionEnv`; the defaults describe a
+  DigitalOcean droplet, and `albion-rest-api-staging-gce` overrides them for
+  GCE. Everything else (service unit, nginx, ACME, logrotate, tmpfiles, users)
+  is shared verbatim across every host.
+- **The `rest-api` unit has `wantedBy = []` and is gated on
+  `/run/albion/rest-api.ready`, which lives on tmpfs.** It therefore does *not*
+  come back by itself after a reboot on any host — re-run the service
+  activation (`deploy-*-service`) after rebooting a box.
+
+---
+
+## Staging on GCE
+
+The GCE staging host reuses every application-level module from the droplet and
+swaps only the hardware layer.
+
+| Item          | Value                                                    |
+| ------------- | -------------------------------------------------------- |
+| GCP project   | `albion-rest-api-1` (org `albionlabs.org`, `393901517099`) |
+| VM            | `albion-rest-api-staging`, `e2-standard-2`, `europe-west3-b` |
+| Boot disk     | 40 GiB `pd-balanced`, partitioned by `disko` (`/dev/sda`) |
+| Static IP     | `albion-rest-api-staging-ip` — reserved, regional         |
+| Firewall      | `allow-http` / `allow-https` on tags `http-server`,`https-server`; SSH via the default network rule |
+
+Use `gcloud --account alastair@albionlabs.org --project albion-rest-api-1`, or
+a dedicated named configuration, so nothing lands in an unrelated project.
+
+### Provision the VM
+
+```bash
+gcloud compute addresses create albion-rest-api-staging-ip --region=europe-west3
+gcloud compute instances create albion-rest-api-staging \
+  --zone=europe-west3-b --machine-type=e2-standard-2 \
+  --image-family=debian-12 --image-project=debian-cloud \
+  --boot-disk-size=40GB --boot-disk-type=pd-balanced \
+  --address=albion-rest-api-staging-ip \
+  --tags=http-server,https-server --metadata=enable-oslogin=FALSE \
+  --metadata-from-file=startup-script=startup.sh
+```
+
+The startup script only has to install the deploy public key into
+`/root/.ssh/authorized_keys` and allow `PermitRootLogin prohibit-password`, so
+that `nixos-anywhere` can kexec in. Everything after the install is governed by
+`keys.nix`.
+
+### Install NixOS over the Debian image
+
+`nixos-anywhere` kexecs into an installer, repartitions `/dev/sda` with
+`disko.nix`, and reboots into NixOS. Build on the target — the flake has no
+aarch64-linux builder, so an Apple Silicon workstation cannot build the x86_64
+closure locally:
+
+```bash
+nix run github:nix-community/nixos-anywhere -- \
+  --flake '.#albion-rest-api-staging-gce' \
+  --build-on remote \
+  --target-host root@<static-ip>
+```
+
+### Deploy
+
+```bash
+DEPLOY_HOST=<static-ip> nix run .#deployStagingGceNixos    # system only
+DEPLOY_HOST=<static-ip> nix run .#deployStagingGceService  # rest-api only
+DEPLOY_HOST=<static-ip> nix run .#deployStagingGceAll      # both
+```
+
+### Seed secrets and data from an existing host
+
+The runtime secret is a single file. Pipe it host-to-host so it never lands on
+a workstation disk:
+
+```bash
+ssh root@<old-host> 'cat /etc/albion/rest-api.env' \
+  | ssh root@<new-host> 'install -m 600 /dev/stdin /etc/albion/rest-api.env'
+```
+
+`/etc/albion-rest-api/config.toml` is **not** a secret and must not be copied —
+`os.nix` materialises it from `config/staging.toml`.
+
+Copy the data directory (`albion.db` holds the API keys, so it must be moved
+rather than regenerated; `raindex.db` would otherwise re-sync from scratch):
+
+```bash
+ssh root@<old-host> "tar c --exclude='raindex.db-shm' \
+    -C /mnt/data/albion-rest-api-staging . | gzip -1" \
+  | ssh root@<new-host> "gzip -d | tar x --no-same-owner \
+    -C /mnt/data/albion-rest-api-staging \
+    && chown -R albion-rest-api:albion /mnt/data/albion-rest-api-staging"
+```
+
+The SQLite files are copied while the source service is live, so verify on the
+target before starting anything — checkpoint the WAL and confirm both databases
+report `ok`:
+
+```bash
+sqlite3 raindex.db 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA integrity_check;'
+sqlite3 albion.db  'PRAGMA integrity_check;'
+```
+
+### TLS before DNS moves
+
+ACME uses HTTP-01, so it cannot issue a certificate until the public DNS record
+points at the new host. Until then NixOS serves a self-signed placeholder and
+`acme-order-renew-<domain>.service` sits in a failed state. That unit is
+`Restart=no` and retried only by its daily timer, so it neither crash-loops nor
+burns Let's Encrypt rate limits — but it also will not retry promptly on its
+own. **Immediately after the DNS flip, kick it manually:**
+
+```bash
+systemctl start acme-order-renew-api.staging.albionlabs.org.service
+```
+
+Verify the proxy path before cutover with an explicit `Host` header:
+
+```bash
+curl -sk https://<static-ip>/health -H 'Host: api.staging.albionlabs.org'
+```
 
 ---
 
